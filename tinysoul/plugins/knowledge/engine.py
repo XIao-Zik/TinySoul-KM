@@ -254,6 +254,110 @@ class KnowledgeEngine:
             dry_run=False,
         )
 
+    def ingest_chat(
+        self,
+        source: Path,
+        *,
+        platform: str = "deepseek",
+        dry_run: bool = False,
+    ) -> IngestReport:
+        """Import a chat export file (JSON/Markdown/HTML) as knowledge entries."""
+
+        from .ingest.chat_export import parse_chat_file, render_chat_markdown, split_session
+
+        if not isinstance(source, Path):
+            raise KnowledgeContractError("Chat export source must be a path")
+        if not source.is_file():
+            raise KnowledgeContractError(
+                f"Chat export file does not exist: {source}"
+            )
+        now = datetime.now(timezone.utc)
+        parsed = parse_chat_file(source, platform=platform)
+        added: list[str] = []
+        unchanged = 0
+        failures: list[tuple[str, str]] = [
+            (source.name, warning) for warning in parsed.warnings
+        ]
+        planned: list[tuple[str, StoreDocument]] = []
+        for session in parsed.sessions:
+            for chunk in split_session(session):
+                relative = self._chat_store_path(chunk)
+                # Checksum the canonical session content, not the store form:
+                # km_imported changes every run and must not force re-imports.
+                epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+                canonical = normalize_text(
+                    render_chat_markdown(chunk, km_id="", imported_at=epoch)
+                )
+                checksum = content_checksum(canonical)
+                entry = self._index.get(relative)
+                if entry is not None and entry.checksum == checksum:
+                    unchanged += 1
+                    continue
+                km_id = (
+                    entry.km_id
+                    if entry is not None and entry.km_id
+                    else "c-" + sha256(relative.encode("utf-8")).hexdigest()[:12]
+                )
+                text = normalize_text(
+                    render_chat_markdown(chunk, km_id=km_id, imported_at=now)
+                )
+                planned.append(
+                    (
+                        relative,
+                        StoreDocument(
+                            relative_path=relative,
+                            km_id=km_id,
+                            checksum=checksum,
+                            title=chunk.title,
+                            links=(),
+                            tags=(f"platform/{chunk.platform}",),
+                            text=text,
+                        ),
+                    )
+                )
+        if dry_run:
+            return IngestReport(
+                source=f"chat/{platform}",
+                added=tuple(sorted(path for path, _ in planned)),
+                updated=(),
+                tombstoned=(),
+                unchanged=unchanged,
+                failures=tuple(failures),
+                dry_run=True,
+            )
+        for relative, document in planned:
+            try:
+                self._store.write_chat(relative, document.text)
+            except (KnowledgeContractError, KnowledgeIOError) as exc:
+                failures.append((relative, f"store write failed: {exc}"))
+                continue
+            self._index.put(
+                index_entry_for(
+                    document,
+                    source="chat",
+                    mtime=now.timestamp(),
+                    size=len(document.text),
+                )
+            )
+            added.append(relative)
+        self._index.save()
+        return IngestReport(
+            source=f"chat/{platform}",
+            added=tuple(sorted(added)),
+            updated=(),
+            tombstoned=(),
+            unchanged=unchanged,
+            failures=tuple(failures),
+            dry_run=False,
+        )
+
+    def _chat_store_path(self, session) -> str:
+        from .ingest.chat_export import chat_slug
+
+        day = session.day or datetime.now(timezone.utc).date()
+        slug = chat_slug(session.title)
+        return f"{day:%Y-%m}/{session.platform}/{slug}.md"
+
     def stats(self) -> dict[str, int]:
         entries = self._index.all()
         return {
@@ -319,8 +423,14 @@ class KnowledgeEngine:
                 yield cached
                 continue
             from tinysoul.kernel.retrieval.disclosure import content_units
+            from .failures import KnowledgeIOError
 
-            text = self._store.read_note(entry.path)
+            try:
+                text = self._store.read_document(entry.path, source=entry.source)
+            except KnowledgeIOError:
+                # Stale index entry whose file is gone; the next ingest
+                # reconciles it. Skip instead of failing the whole query.
+                continue
             units = content_units(self.ref_for(entry.km_id), text)
             value = (entry, text, units)
             self._corpus_cache[entry.path] = value

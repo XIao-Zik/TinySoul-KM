@@ -151,6 +151,16 @@ def _km_ingest(argv: Sequence[str]) -> int:
         help="Obsidian vault directory to import (Markdown files)",
     )
     parser.add_argument(
+        "--chat",
+        type=Path,
+        help="chat export file (JSON/Markdown/HTML) to import",
+    )
+    parser.add_argument(
+        "--platform",
+        default="deepseek",
+        help="chat platform label recorded in frontmatter (default: deepseek)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="report the changes that would happen without writing anything",
@@ -167,14 +177,19 @@ def _km_ingest(argv: Sequence[str]) -> int:
             stream.reconfigure(errors="replace")
         except (AttributeError, OSError):
             pass
-    if args.obsidian is None:
+    if args.obsidian is None and args.chat is None:
         print(
-            "tinysoul: km-ingest requires --obsidian (chat sources arrive in M3)",
+            "tinysoul: km-ingest requires --obsidian or --chat",
+            file=sys.stderr,
+        )
+        return 2
+    if args.obsidian is not None and args.chat is not None:
+        print(
+            "tinysoul: km-ingest accepts only one of --obsidian or --chat",
             file=sys.stderr,
         )
         return 2
     root = args.root.expanduser().resolve()
-    vault = args.obsidian.expanduser().resolve()
     try:
         from tinysoul.plugins.knowledge.config import parse_knowledge_settings
         from tinysoul.plugins.knowledge.engine import KnowledgeEngine
@@ -184,7 +199,17 @@ def _km_ingest(argv: Sequence[str]) -> int:
             "knowledge", lambda tree: parse_knowledge_settings(tree, project_root=root)
         )
         engine = KnowledgeEngine(settings=settings)
-        report = engine.ingest_obsidian(vault, dry_run=args.dry_run, full=args.full)
+        if args.obsidian is not None:
+            vault = args.obsidian.expanduser().resolve()
+            report = engine.ingest_obsidian(
+                vault, dry_run=args.dry_run, full=args.full
+            )
+        else:
+            report = engine.ingest_chat(
+                args.chat.expanduser().resolve(),
+                platform=args.platform,
+                dry_run=args.dry_run,
+            )
     except GatewayError as exc:
         print(f"tinysoul: {exc}", file=sys.stderr)
         return 1

@@ -56,25 +56,28 @@ class KnowledgeStore:
     def note_path(self, relative_path: str) -> Path:
         """Map a forward-slash store-relative note path to a safe target."""
 
+        return self._safe_path(self.notes_root, relative_path)
+
+    def _safe_path(self, base: Path, relative_path: str) -> Path:
         if not relative_path or relative_path.startswith("/"):
             raise KnowledgeContractError(
-                f"Knowledge note path is invalid: {relative_path!r}"
+                f"Knowledge document path is invalid: {relative_path!r}"
             )
         parts = relative_path.split("/")
         if any(part in ("", ".", "..") for part in parts):
             raise KnowledgeContractError(
-                f"Knowledge note path is invalid: {relative_path!r}"
+                f"Knowledge document path is invalid: {relative_path!r}"
             )
         if not relative_path.lower().endswith(".md"):
             raise KnowledgeContractError(
-                f"Knowledge notes must be Markdown: {relative_path!r}"
+                f"Knowledge documents must be Markdown: {relative_path!r}"
             )
-        path = self.notes_root.joinpath(*parts)
+        path = base.joinpath(*parts)
         resolved = path.absolute()
-        notes_root = self.notes_root.absolute()
-        if notes_root not in resolved.parents:
+        base_abs = base.absolute()
+        if base_abs not in resolved.parents and resolved != base_abs:
             raise KnowledgeInvariantError(
-                f"Knowledge note path escapes the store: {relative_path!r}"
+                f"Knowledge document path escapes the store: {relative_path!r}"
             )
         return path
 
@@ -89,6 +92,26 @@ class KnowledgeStore:
                 f"Failed to read knowledge note {relative_path}: {exc}"
             ) from exc
 
+    def read_document(self, relative_path: str, *, source: str) -> str:
+        """Read a store document from the root matching its km_source."""
+
+        base = {
+            "obsidian": self.notes_root,
+            "chat": self.chats_root,
+            "card": self.cards_root,
+        }.get(source, self.notes_root)
+        path = self._safe_path(base, relative_path)
+        if not path.is_file():
+            raise KnowledgeIOError(
+                f"Knowledge document does not exist: {relative_path}"
+            )
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise KnowledgeIOError(
+                f"Failed to read knowledge document {relative_path}: {exc}"
+            ) from exc
+
     def write_note(self, relative_path: str, text: str) -> Path:
         path = self.note_path(relative_path)
         try:
@@ -96,6 +119,30 @@ class KnowledgeStore:
         except OSError as exc:
             raise KnowledgeIOError(
                 f"Failed to write knowledge note {relative_path}: {exc}"
+            ) from exc
+        return path
+
+    def write_chat(self, relative_path: str, text: str) -> Path:
+        """Write under ``chats/`` (relative paths like ``2026-10/deepseek/x.md``)."""
+
+        path = self._safe_path(self.chats_root, relative_path)
+        try:
+            atomic_write_text(path, text)
+        except OSError as exc:
+            raise KnowledgeIOError(
+                f"Failed to write chat document {relative_path}: {exc}"
+            ) from exc
+        return path
+
+    def write_card(self, relative_path: str, text: str) -> Path:
+        """Write under ``cards/`` (M4 daily knowledge cards)."""
+
+        path = self._safe_path(self.cards_root, relative_path)
+        try:
+            atomic_write_text(path, text)
+        except OSError as exc:
+            raise KnowledgeIOError(
+                f"Failed to write card document {relative_path}: {exc}"
             ) from exc
         return path
 

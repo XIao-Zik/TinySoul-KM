@@ -10,7 +10,7 @@
 | M0 地基 | ✅ 完成 | `docs(km)` / `chore(km)` |
 | M1 插件+导入 | ✅ 完成 | `feat(km): M1 knowledge 插件骨架与 Obsidian 增量导入` |
 | M2 检索 | ✅ 完成 | `feat(km): M2 km.search 混合检索接入内核管道` |
-| M3 聊天导入 | ⬜ 未开始 | |
+| M3 聊天导入 | ✅ 完成 | `feat(km): M3 聊天记录导入（JSON/MD/HTML 适配器）` |
 | M4 每日反思 | ⬜ 未开始 | |
 | M5 前端 | ⬜ 未开始 | |
 | M6 评估包装 | ⬜ 未开始 | |
@@ -84,6 +84,25 @@
 - **向量通道未激活**：bigmodel embedding-3 返回 429"余额不足"（免费 key 只覆盖 glm-4.5-flash），ARK key 无效。管路已就绪（channels 已声明 embedding、EmbeddingIndex 已装配、rerank 已绑 embedding_similarity），换有余额的 embedding key 或本地 onnx 模型即生效。`hit@5 ≥ 词法基线+5pt` 的向量验收顺延至凭据可用。
 - glm-4.5-flash 偶发仍把 source 序列化为字符串（约 1/10 次调用），失败反馈可自愈重试；属免费模型 tool-calling 质量问题。
 - 评测集当前基于合成 vault；真实笔记题目待用户数据接入后滚动补充（人工复核 ≥80% 要求适用于真实题）。
+
+## M3 聊天记录导入（2026-10-12）
+
+完成项（对照 02 文档 §4–§5）：
+
+- [x] `tinysoul/plugins/knowledge/ingest/chat_export.py`：统一中间结构 `{title, turns[{role,text}], url?, day?}`；JSON（DeepSeek/ChatGLM 常见形状：conversations/sessions/data 包装、messages/turns/history 字段、role 别名归一）、Markdown（`# 标题` 分会话 + `用户:/助手:` 轮次，支持行内与整行两种写法）、HTML（trafilatura 兜底）三适配器。
+- [x] `tinysoul km-ingest --root . --chat <file> [--platform deepseek] [--dry-run]`。
+- [x] 会话存 `chats/YYYY-MM/<platform>/<slug>.md`，frontmatter 记 `km_source: chat` + 平台/日期/URL；正文 `## 问题`/`## 回答` 交替；>20 轮自动切分 part N。
+- [x] 增量幂等：checksum 取不含 `km_imported` 时间戳的规范会话内容，重复导入 unchanged（实测 3/3 unchanged）。
+- [x] 验收：3 个样例会话导入正文完整、元数据正确；对话中 km.search 检索"RRF 融合"命中聊天条目并正确作答（source=chat 过滤维度可用）。
+- [x] 单测：JSON/MD 解析、切分、slug、导入幂等、corpus 可检索、缺失文件契约错误；全量 pytest 绿（基线口径）。
+
+实施修正（M3 过程中发现）：
+
+1. `KnowledgeStore.write_note` 强制写入 `notes/` 根——聊天/卡片需要各自根目录，新增 `write_chat`/`write_card`/`read_document`（按 `km_source` 分发根目录），原 note 逻辑不变。
+2. corpus 对索引中文件已缺失的条目跳过而非整查询失败（脏索引自愈，下次导入对账）。
+3. `tests/agent/test_sdk.py::test_execution_is_stopped_before_queued_next_day_work_can_archive` 全量跑时偶发失败、单跑通过（上游时序敏感用例，非本改动回归，登记观察）。
+
+遗留：无（与 Session organize 的联动验证并入 M4 反思阶段）。
 
 ## 附录：环境事实
 
