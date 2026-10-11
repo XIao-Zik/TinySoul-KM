@@ -1,0 +1,27 @@
+name = "workspace.move"
+domain = "workspace"
+
+[tool]
+description = "Move a Workspace file or directory to an absent destination."
+
+[tool.schema]
+type = "object"
+required = ["source_ref","target_ref"]
+additionalProperties = false
+
+[tool.schema.properties]
+
+[tool.schema.properties.source_ref]
+type = "string"
+
+[tool.schema.properties.target_ref]
+type = "string"
+
+[semantic]
+effects = ["modifying"]
+
+[runtime]
+parallel_policy = "serial"
+
+[execution]
+executor = "workspace.move"

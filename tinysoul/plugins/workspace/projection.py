@@ -1,0 +1,394 @@
+"""Workspace integration with the Context projection protocol."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol
+
+from tinysoul.infra.concurrency import JoinedOperations
+from tinysoul.infra.continuation import ContinuationError, OpaqueContinuationCodec
+from tinysoul.infra.json import JsonObject, JsonValue, to_json_object
+from tinysoul.kernel.context.errors import (
+    ContextInspectFailureReason,
+    ContextInspectRequestError,
+    inspect_continuation_error,
+)
+from tinysoul.kernel.context.segments import (
+    ReadOnlySegmentRegistration,
+    SegmentCapability,
+    SegmentDescriptor,
+    SegmentRegistration,
+    SegmentShape,
+    SegmentSlot,
+    TurnInfo,
+)
+from tinysoul.kernel.retrieval.disclosure import (
+    DisclosureHint,
+    DisclosurePage,
+    DisclosureUnit,
+    InspectPage,
+)
+from tinysoul.llm.protocol.messages import Message, UserMessage
+from tinysoul.prompts.plugins import workspace as prompt_text
+from tinysoul.runtime import RunScope, RuntimeException, Signal
+
+from .engine import WorkspaceArchiveView, WorkspaceEngine
+from .errors import WorkspaceContractError, WorkspaceError
+from .failures import WorkspaceFailureKind
+from .runtime_bridge import RuntimeWorkspaceBridge
+from .storage.manifest import WorkspaceManifest
+
+if TYPE_CHECKING:
+    from tinysoul.kernel.loop.lifecycle.preparation import TurnPreparationRequest
+
+
+SIGNAL_WORKSPACE_SYNC = "context.workspace.sync"
+
+
+@dataclass(frozen=True)
+class WorkspaceRefresh:
+    """Read the committed owner projection at the Context boundary."""
+
+
+@dataclass(frozen=True)
+class WorkspaceResource:
+    """A workspace resource handle with a short summary."""
+
+    ref: str
+    summary: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.ref, str) or not self.ref:
+            raise WorkspaceContractError("WorkspaceResource.ref must be non-empty")
+        if not isinstance(self.summary, str) or not self.summary:
+            raise WorkspaceContractError("WorkspaceResource.summary must be non-empty")
+
+
+@dataclass(frozen=True)
+class WorkspaceSnapshot:
+    """A complete current Workspace manifest projection."""
+
+    resources: tuple[WorkspaceResource, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        resources = tuple(self.resources)
+        if any(not isinstance(resource, WorkspaceResource) for resource in resources):
+            raise WorkspaceContractError(
+                "Workspace projection requires typed resources"
+            )
+        object.__setattr__(self, "resources", resources)
+        refs = tuple(resource.ref for resource in resources)
+        if len(set(refs)) != len(refs):
+            raise WorkspaceContractError(
+                "WorkspaceSnapshot.resources must contain unique refs"
+            )
+
+
+def workspace_refresh_signal(
+    *,
+    call_id: str,
+    scope: RunScope,
+    source: str,
+) -> Signal:
+    return Signal(
+        name=SIGNAL_WORKSPACE_SYNC,
+        source=source,
+        scope=scope,
+        payload={"call_id": call_id},
+    )
+
+
+def parse_workspace_refresh(signal: Signal) -> WorkspaceRefresh:
+    return WorkspaceRefresh()
+
+
+class WorkspaceSegment:
+    """Turn-local manifest projection, separate from the kernel's plan state."""
+
+    def __init__(self, workspace: WorkspaceEngine) -> None:
+        self._workspace = workspace
+        self._snapshot: WorkspaceSnapshot | None = None
+
+    async def prepare(
+        self, updates: tuple[WorkspaceRefresh, ...]
+    ) -> WorkspaceSnapshot | None:
+        if not updates:
+            return self._snapshot
+        operations = JoinedOperations()
+        try:
+            manifest = await operations.run(self._workspace.snapshot)
+            operations.check_cancelled()
+            return workspace_snapshot(manifest)
+        except WorkspaceError as exc:
+            raise RuntimeWorkspaceBridge().from_workspace_error(exc) from exc
+
+    def install(self, prepared: WorkspaceSnapshot | None) -> None:
+        self._snapshot = prepared
+
+    def seal(self) -> JsonObject:
+        return {
+            "resources": self._resources(),
+        }
+
+    def render(self) -> tuple[Message, ...]:
+        return (
+            UserMessage.from_text(
+                prompt_text.workspace_directory(
+                    tuple(
+                        (item.ref, item.summary)
+                        for item in (self._snapshot.resources if self._snapshot else ())
+                    )
+                ),
+                label="workspace",
+            ),
+        )
+
+    def _resources(self) -> list[JsonValue]:
+        return [
+            {"ref": item.ref, "summary": item.summary}
+            for item in (self._snapshot.resources if self._snapshot is not None else ())
+        ]
+
+    async def close(self) -> None:
+        self._snapshot = None
+
+
+class WorkspaceSegmentProvider:
+    def __init__(self, workspace: WorkspaceEngine) -> None:
+        self._workspace = workspace
+
+    async def open(self, info: TurnInfo) -> WorkspaceSegment:
+        return WorkspaceSegment(self._workspace)
+
+
+def workspace_segment_registration(
+    workspace: WorkspaceEngine,
+) -> SegmentRegistration[WorkspaceRefresh, WorkspaceSnapshot | None]:
+    return SegmentRegistration(
+        descriptor=SegmentDescriptor("workspace", "workspace", SegmentSlot.WORKING, 20),
+        provider=WorkspaceSegmentProvider(workspace),
+        signal_name=SIGNAL_WORKSPACE_SYNC,
+        update_type=WorkspaceRefresh,
+        decode=parse_workspace_refresh,
+    )
+
+
+class ArchivedWorkspaceSegment:
+    """A dated, read-only reference view, separate from the current workbench."""
+
+    def __init__(self, view: WorkspaceArchiveView | None) -> None:
+        self._view = view
+
+    def render(self) -> tuple[Message, ...]:
+        if self._view is None:
+            return ()
+        return (UserMessage.from_json(self._page(0), label="workspace_archive"),)
+
+    def seal(self) -> JsonObject:
+        return {"source_day": self._view.day if self._view is not None else None}
+
+    def navigation_refs(self) -> tuple[str, ...]:
+        if self._view is None:
+            return ()
+        return (f"workspace_archive:{self._view.day}",)
+
+    def _page(self, offset: int) -> JsonObject:
+        if self._view is None:
+            return {"resources": []}
+        resources = self._view.manifest.resources
+        selected = resources[offset : offset + 32]
+        return {
+            "ref": f"workspace_archive:{self._view.day}",
+            "source_day": self._view.day,
+            "read_only": True,
+            "resources": [
+                {
+                    "ref": f"workspace_archive:{self._view.day}/{item.relative_path}",
+                    "summary": item.context_summary[:500],
+                }
+                for item in selected
+            ],
+            "continuation": (
+                str(offset + len(selected))
+                if offset + len(selected) < len(resources)
+                else None
+            ),
+        }
+
+    async def inspect(
+        self, ref: str, *, query: str | None = None, continuation: str | None = None
+    ) -> InspectPage:
+        if query is not None:
+            raise ContextInspectRequestError(
+                ContextInspectFailureReason.QUERY_UNSUPPORTED,
+                prompt_text.ARCHIVED_WORKSPACE_SUPPORTS_NAVIGATION_ONLY,
+            )
+        view = self._view
+        if view is None:
+            raise ContextInspectRequestError(
+                ContextInspectFailureReason.UNKNOWN_REF,
+                prompt_text.NO_ARCHIVED_WORKSPACE_IS_BOUND,
+            )
+        root = f"workspace_archive:{view.day}"
+        if ref == root:
+            page = DisclosurePage(
+                ref,
+                "archive_directory",
+                children=tuple(
+                    DisclosureHint(
+                        f"{root}/{item.relative_path}",
+                        item.relative_path,
+                        item.context_summary,
+                    )
+                    for item in view.manifest.resources
+                ),
+            )
+            return self._render_page(page, continuation)
+        record = next(
+            (
+                item
+                for item in view.manifest.resources
+                if ref == f"{root}/{item.relative_path}"
+            ),
+            None,
+        )
+        if record is None:
+            raise ContextInspectRequestError(
+                ContextInspectFailureReason.UNKNOWN_REF,
+                prompt_text.UNKNOWN_ARCHIVED_WORKSPACE_REFERENCE,
+            )
+        try:
+            operations = JoinedOperations()
+            read = await operations.run(lambda: view.read_text(record.ref))
+            operations.check_cancelled()
+        except WorkspaceContractError as exc:
+            raise ContextInspectRequestError(
+                ContextInspectFailureReason.UNKNOWN_REF,
+                prompt_text.ARCHIVED_RESOURCE_CANNOT_BE_READ_AS_TEXT,
+            ) from exc
+        except WorkspaceError as exc:
+            raise RuntimeWorkspaceBridge().from_workspace_error(exc) from exc
+        page = DisclosurePage(
+            ref,
+            "archive_text",
+            content=(
+                DisclosureUnit(
+                    ref,
+                    prompt_text.archived_text_title(
+                        record.relative_path, read.truncated
+                    ),
+                    read.text,
+                    {
+                        "source_day": view.day,
+                        "text": read.text,
+                        "truncated": read.truncated,
+                    },
+                ),
+            ),
+        )
+        return self._render_page(page, continuation)
+
+    @staticmethod
+    def _render_page(page: DisclosurePage, continuation: str | None) -> InspectPage:
+        try:
+            return page.render(
+                codec=OpaqueContinuationCodec(
+                    owner="workspace_archive", operation="inspect"
+                ),
+                max_chars=8000,
+                continuation=continuation,
+            )
+        except ContinuationError as exc:
+            raise inspect_continuation_error(exc, ref=page.ref) from exc
+
+    async def close(self) -> None:
+        self._view = None
+
+
+class ArchivedWorkspaceSegmentProvider:
+    def __init__(self, source: Callable[[], WorkspaceArchiveView | None]) -> None:
+        self._source = source
+
+    async def open(self, info: TurnInfo) -> ArchivedWorkspaceSegment:
+        return ArchivedWorkspaceSegment(self._source())
+
+
+def archived_workspace_segment_registration(
+    source: Callable[[], WorkspaceArchiveView | None],
+) -> ReadOnlySegmentRegistration:
+    return ReadOnlySegmentRegistration(
+        SegmentDescriptor(
+            "workspace_archive",
+            "workspace",
+            SegmentSlot.BACKGROUND,
+            60,
+            ("workspace_archive:",),
+            SegmentShape.STATE,
+            frozenset({SegmentCapability.INSPECT}),
+        ),
+        ArchivedWorkspaceSegmentProvider(source),
+    )
+
+
+class WorkspaceRuntimeBridge(Protocol):
+    """Runtime mapping surface needed by Turn preparation."""
+
+    def from_workspace_error(self, error: Exception) -> RuntimeException: ...
+
+    def from_failure(
+        self,
+        kind: WorkspaceFailureKind,
+        *,
+        message: str,
+        payload: JsonObject | None = None,
+    ) -> RuntimeException: ...
+
+
+def workspace_snapshot(manifest: WorkspaceManifest) -> WorkspaceSnapshot:
+    """Project a committed Workspace manifest into Context's read model."""
+
+    return WorkspaceSnapshot(
+        resources=tuple(
+            WorkspaceResource(ref=record.ref, summary=record.context_summary)
+            for record in manifest.resources
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class WorkspaceTurnPreparationHandler:
+    """Reconcile disk and publish its Manifest before a Turn starts work."""
+
+    workspace: WorkspaceEngine
+    runtime_bridge: WorkspaceRuntimeBridge
+
+    async def prepare(self, request: "TurnPreparationRequest") -> tuple[Signal, ...]:
+        try:
+            self.workspace.require_day(request.active_day)
+            operations = JoinedOperations()
+            result = await operations.run(self.workspace.reconcile)
+        except WorkspaceError as exc:
+            raise self.runtime_bridge.from_workspace_error(exc) from exc
+        if not result.complete:
+            payload: JsonObject = to_json_object(
+                {
+                    "limit_reached": result.limit_reached,
+                    "skipped_count": result.skipped_count,
+                    "skip_counts": result.skip_counts(),
+                }
+            )
+            raise self.runtime_bridge.from_failure(
+                WorkspaceFailureKind.IO_FAILED,
+                message="Workspace reconciliation was incomplete at Turn start.",
+                payload=payload,
+            )
+        await operations.finish(self.workspace.events.flush)
+        operations.check_cancelled()
+        return (
+            workspace_refresh_signal(
+                call_id=f"{request.turn_id}:workspace",
+                scope=request.scope,
+                source="workspace.turn_prepare",
+            ),
+        )

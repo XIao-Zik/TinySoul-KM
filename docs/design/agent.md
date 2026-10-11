@@ -1,0 +1,87 @@
+# Agent 设计
+
+## 定位与依赖
+
+`tinysoul.agent` 是嵌入式 SDK 与进程装配层，拥有唯一根队列、环境事件路由、运行世代和日协调。它通过显式 Plugin 声明装配真实 owner，通过 TurnProfile 调用同一套异步 Turn/Cycle/Phase 内核，不实现另一套推理或 Action 状态机。
+
+内部 composition 负责跨 owner 装配，dispatch 负责根队列、输入与事件路由，lifecycle 负责世代/日边界与运行策略，observation 负责输出旁路。SDK、请求和受约束服务保持公开入口；内部子包不各自创建 Agent 生命周期或 Job 表。
+
+依赖方向为 `infra → runtime/llm → kernel → plugins/environment → agent → gateway`。Environment 只通过注入的输入端口提交请求；CLI、HTTP、终端输出和项目命令位于 gateway。Agent 不导入 gateway，也不自动开启终端或 HTTP 监听。
+
+## 装配、服务与生命周期
+
+AgentBuilder 收集静态组成定义；同步 `build()` 返回不可变 AgentAssembly，不创建 Engine、来源或根调度器。Agent.assemble 将定义物化为 AgentRuntime，AgentRuntime 保存根调度器、命令门面、配置控制器和当前 AgentGeneration。User、Home Reflection、Memory Reflection 分别解析 PluginProfileExtension，先校验服务身份、依赖和段路由，再激活段与 Action 贡献；PluginGeneration 持有代级 owner、来源和永久 close。TurnProfile 绑定独立 Context、Action surface、准备/完成管线和类型化服务表。
+
+Agent.create 从项目根装配并委托 Agent.assemble；Agent.assemble 接受静态 AgentAssembly，供嵌入方通过 Builder 注入 provider、时钟、来源或显式 AgentPlugin。create 不启动来源，start 等待确定性日切与服务激活后才返回。SDK 的 submit、append、reply、cancel、grant 与 publish 经 AgentCommands 进入唯一调度器或指定 Inbox。状态查询为内存快照，TurnHandle 等待 owner 的 TurnOutcome/ReflectionOutcome；等待者取消不取消已受理 work。外部 ACP/MCP 能力同样由当前世代装配，旧 facade 失效后由调用者重新获取。
+
+Agent.services 按 Facade 类型提供插件通过 PluginServiceExport 显式导出的 SDK 服务，包括 HomeService、MemoryService、SessionService 与 WorkspaceService；查找不触发 I/O。AgentRuntime.sdk_services 是同一导出集合，TurnProfile.services 则只属于对应执行情景，内部服务不会自动进入 SDK。服务公开 I/O 为 async，短文件操作由 JoinedOperations 完整 join，模型和网络使用原生 async。每次调用按世代→日→owner 的顺序获取并复验 lease；闲置对象不占用运行边界。成功 reload、restart 或关闭使旧世代服务失效，日级服务还会在日切后失效；调用者重新获取，框架不重绑或重试写入。失败 reload 保留仍有效的旧对象。空闲后的新日调用先完成确定性准备，旧日服务随后在副作用前返回 AgentServiceStaleError；Home 服务只绑定世代。宿主无需创建 RunScope/Trap，日准备失败返回有界 AgentServiceUnavailableError。
+
+Agent.runtime 与 AgentRuntime 类型供内部宿主集成使用：准备阶段可通过 mount_service 挂载 Endpoint 等 EnvironmentService，挂载集合称为 host_services。常规业务使用 Agent、TurnHandle、SDK 服务与 Observation。reload 在同一 runtime 内替换 AgentGeneration；restart 重建 runtime，宿主须重新获取并绑定，旧对象不会自动指向新运行实例。CLI 的稳定 EndpointHost 在每次 restart 后重新 bind 当前 Agent.runtime。
+
+只运行一个根 Turn。等待用户、Job、定时器或预算期间仍占根位置，新 User/Reflection 请求排队。队列和已完成句柄保留有界；重复 request identity 必须内容相同。queued 阶段取消不伪造 Session Turn，开始后的取消先收尾再完成句柄。所有路径共用一次收敛出口；取消立即移除队列占位，完成按次序进入保留窗口。去重只保证活动请求和保留窗口内的身份一致；淘汰后外部已持 Handle 仍可 wait。
+
+根请求由 request_id 受理、查询与控制，排队时 turn_id 为 null。取得 active_day lease 后，AgentDayCoordinator 通过 `runtime/agent/turn-sequence.json` 的日期和高水位分配正式 `YYYY-MM-DD/<sequence>`，User/Reflection 共用日内序列，重启或重载继续序号，新日从 1 开始。持久分配复用单文件原子写，不从 Session 推算，不增加 WAL/CAS；允许因未写 Session 的 Reflection 或失败产生空缺。Context、RunScope、Jobs 和 Session 使用正式 Turn 身份。EnvironmentEvent 的目标仍是请求 handle 的 request_id，订阅注册与注销沿该请求生命周期进行。
+
+宿主可以读取这一保留窗口的 Turn 目录，用于在对话中呈现普通对话与独立整理。Handle 记录受理、根执行开始和完成时间，来源由原始类型化请求投影；摘要不展开模型正文或完整结果。目录复用 scheduler 的队列和完成保留策略，不新增 Reflection 历史存储，也不将 Reflection 写入 User Session。
+
+start/shutdown/restart 由各自拥有的任务串行衔接，并发等待者加入同一操作；启动中关闭立即停止受理并等待部分资源回收，旧 worker 回调不会修改新实例。shutdown 停止受理和外部来源，再取消根 work，等待 Action/Job、必要记录、段和来源回收，最后关闭世代。restart 重新装配，旧句柄保留旧结果。自建 LLM 与专用 ModelServices 客户端归世代关闭，注入对象保持借用。Action 用途和来源能力由 PluginDefinitions 收集，generation 在激活前校验有效动作的模型依赖。Search 结果视图经 Turn preparation/cleanup 更新生命周期，SDK 则沿服务 lease 隔离。部分激活失败逆序关闭已创建资源；重复取消不抛弃清理任务，有限 cleanup diagnostics 不覆盖主失败。
+
+部分激活失败先停止受理和来源，再经 RootScheduler 的同一完成入口结清启动期间已接受的请求，最后释放 runtime。启动失败保留 FAILED 与有界错误类型，启动被取消使用 CANCELLED；未执行请求不伪造 TurnOutcome、Session 或取消意图。单 runtime 的可用性由激活完成和受理状态派生；稳定宿主的业务访问由 Agent 运行状态决定，依赖已装配不表示可以接受外部工作。
+
+Agent.wait_for_exit 等待根调度运行最终退出，跨越 generation restart；正常退出返回现有 AgentRunResult，运行失败传播原有异常。单个等待者取消只解除自身等待，显式 shutdown 使尚未完成的退出等待收到 CancelledError，已完成结果仍保留。此接口不消费 Signal，也不代替释放世代资源的 shutdown；返回结果属于最终结束的根调度运行，不累计各次重启。restart 失败由发起方接收，宿主等待保持有效，允许显式重新启动。CLI 的信号处理每次获取当前 commands，重建时重新加载配置与输入来源；Endpoint server 与事件缓冲保持进程级稳定。
+
+## 输入、事件与容量
+
+User Session 插件同时取得只读服务和窄 SessionOrganizeService，后者仅供 core.session.organize 及段刷新；SDK SessionService 和 Reflection 继续只读。整理提交不增加根 work、隐藏模型任务或另一条完成管线，当前 Turn 仍由唯一 recorder 在收尾保存。
+
+Environment 提供输入适配、文件监听和定时等待；Reflection 到期规则由插件解释，经注入的类型化提交端口进入根队列。AgentIngress 解释可信终端命令和普通用户文本；InputCommandParser 纯解析，InputDispatcher 调用 AgentCommands。终端普通文本在空闲时提交 UserTurnRequest，活跃时追加到该 TurnInbox。Reflection 始终排入根队列。
+
+`/reply <question_id> <text>` 与 `/grant <request_id> <count>` 明确关联当前等待；普通追加作为新指示中断 INPUT/EVENT/TIMER 等待，保留原问题未答事实；它不伪造 reply，也不增加预算。取消、退出不排在普通输入后；退出停止后续根 work，取消当前 Turn 则保留后续请求。
+
+Runtime EventBus 只校验 envelope、保存有界幂等回执并投递。Agent EventRouter 将定向事件送到指定身份，过期目标不会回退给其他 Turn；无目标事件仅送声明订阅或当前等待匹配的 Turn，按 Turn 身份去重。topic/source 参与过滤，SDK publish 只使用 host 来源，不能冒充 owner 提交、reply、预算决定或 Job 终态。普通事件不隐式创建根 work。
+
+PluginProfileExtension 收集事件适配、preparation/completion 和情景内服务、段、动作；ResolvedProfileExtensions 将它们交给既有 TurnProfile 和完成管线，Session recorder 仍最后执行且只在 User 情景声明。PluginGeneration 在代级持有来源，GenerationSources 在激活前拒绝冲突身份，启动一次并在日切/世代切换前停止且 join；profile 不拥有来源生命周期。来源等待不持日锁；停止与独占切换的顺序保证回调不跨日。Workspace 视图更新由插件适配，不在 Agent/Kernel 中按 owner 名称分支。
+
+TurnInbox 从受理到收尾持续存在，由 Kernel 独占待消费正文。固定 capture → Context prepare/install → ack；新到记录留到后批，等待只观察就绪。SDK 可通过 InboxLimits 设置普通记录数、字节数、单条大小、回执保留与 Job 终态预留数/字节。默认普通队列为 64 条/256000 字节、单条 64000 字节，另预留一个同大小问题回复和 16 个 8192 字节 Job 终态槽；JobRegistry 在启动 backend 前核对其终态预算，容量不足先拒绝。取消和预算决定独立于进度容量，大输出留在 owner 资源。默认值是本地有界策略，不是生产吞吐承诺。
+
+## CalendarDay 与 Reflection 触发
+
+AgentDayCoordinator 使用注入时钟，协调 Memory catalog 与 Archive owner。短日切操作在 JoinedOperations 内完成，取消等待已开始操作结束才释放世代活动边界。日切不调用 LLM，也不依赖 Reflection 成功。
+
+时钟使用 infra 的 CalendarClock；AgentBuilder 通过 with_calendar_clock 注入，默认使用 IanaCalendarClock。Turn 与公开完成/观察结果统一使用 active_day，Reflection 的 source_day/target_day 不与活动日期混用。插件声明负责显式服务、动作和段贡献；完成贡献进入唯一 TurnCompletionPipeline，异步资源仍由各自的组合根与 owner 关闭，不通过空 Segment 或第二条完成事件总线协调。
+
+每项根 work 前完成日切与 availability 刷新，再持 active-day lease 执行；跨午夜等待仍属于开始日。Archive 的可恢复 journal、Session/Memory/Workspace 的初始化与归档由各自 owner 实施。Reflection 只取得只读 ArchiveReader，不拥有推进日期的权限。
+
+daily 触发在 Agent 边界拆为 Home 与触发日前一日 Memory 两个独立请求，整批容量受理；执行前的日切使新关闭日资料可见。scheduled 请求按日期/profile 稳定身份去重，已有 daily 仍可继续修订；手动和自动请求使用相同的整理语义。availability 从 owner 目录重算可整理日期与缺失 daily 的子集，不持久化 backlog；更早日期由明确请求处理。定时来源遇到满载保留请求并重试；启动晚于当日计划时刻不追补模型任务。
+
+## 配置候选与世代激活
+
+组成定义在配置解析与 owner 创建前校验配置所有权。AgentBuilder 将 Harness 自有的 config、agent、action、loop、llm、context、infra、reflection 范围传给 PluginDefinitions；插件范围与保留范围之间、插件彼此之间均不得相等或形成 dotted 父子重叠。capabilities 是公共容器，各 capabilities 子范围仍由插件拥有。配置范围使用 dotted lower_snake_case，配置 settings 类型在插件之间也只有一个 owner。Kernel 只做通用声明校验，不硬编码 Harness 的业务配置名称。generation 获得已解析的 settings 集合，构建服务则严格按插件 requires 筛选。
+
+SDK patch_config 与 HTTP PATCH 统一只校验并原子保存候选，返回 saved/pending_reload。当前运行世代继续服务；reload 在 idle 边界读取候选、校验并构造新世代后切换 RuntimeHandle。活动/等待 Turn、已排队根请求、日切或既有激活会拒绝 reload。已获激活权后新到根可排队，但异步等待激活结束，候选失败后从旧世代继续分派。
+
+候选构建不启动来源；提交时先暂停旧来源，完成新日准备和新来源启动后切换世代。候选失败关闭候选并恢复旧来源；已经保存的磁盘候选仍明确报告。来源激活失败在 Agent 边界转换为有限启动失败，保留 source 和 error_type；既有 Runtime 语义失败保持归属，不把来源实现异常直接传给 Gateway。切换成功后的退休只回收旧资源，失败返回诊断，不伪回滚可见新世代。插件运行来源随世代配置替换；EndpointHost、终端、实例锁与观察缓冲保持稳定。
+
+## 完成结果
+
+Handle 活动状态为 queued/preparing/running/waiting/finalizing/finished；TurnResult.status 从 owner outcome 投影，执行前失败或取消单独使用 RequestFailure，不构造虚假 Turn。finalizing 关闭普通受理，拒绝承诺迟到取消能改变已固定完成意图。必要 finish 失败影响主结果；Session 已提交后取消或 close 失败保留真实回答和独立诊断。Reflection 取消保留任务种类、目标日和底层 TurnOutcome。
+
+SDK 的 TurnSnapshot 与 HTTP 使用同一投影，直接读取保留句柄及当前 Job owner。结果序列化保留正式输出、完成意图、失败和清理分类，剔除 Context 和 Runtime 私有对象；不通过第二张状态表复建结果。运行状态同样由世代与 scheduler 投影；查询不触发日切。JobControl 是供宿主查询/停止的窄 owner 接口，世代装配显式注入它，不把 Gateway 操作扩充进 Loop 的活动控制契约。停止与 Turn 清理在 JobRegistry 内串行；SDK 调用等待已开始的停止完成后才释放世代作用域，失败映射为有界 SDK 错误并保留 Turn 所需监督事实。
+
+## Observation 与 Gateway
+
+ObservationRouter 按 normal/verbose/model 扇出到显式 sink，并提供有界 SDK 订阅。慢订阅得到 gap，不阻塞业务；单一 sink 或订阅编码失败关闭对应观察路径，记录有限错误类型。Observation 不参与提交、Trap 或控制流。
+
+CLI 在 gateway 显式挂载 Console、Terminal 与 EndpointHost。终端读取支持停止与线程回收；来源等待实际受理回执，不维持平行业务队列。HTTP 与 Agent 共用事件循环，宿主保留信号处理权。start --once 关闭定时来源、文件监听、交互输入和 HTTP，通过同一 SDK 队列执行一个 User Turn；只有正式回答返回成功退出码。
+
+normal 输出正式回答与重要运行边界；verbose 增加执行过程；model 展示真实模型输入和归一化输出。Console 有字符上限，Endpoint MODEL replay 面向可信客户端；图片字节和供应商私有推理不作为原始诊断输出。
+
+## 项目资源与发布
+
+gateway 的 ProjectInitializer/ProjectResetter 使用 package-owned 模板。共享配置、统一 Action catalog 与默认 Home 位于 assets/common；assets/standard 与 assets/development 提供互斥初始化取值。common 与选中预设共同生成项目，重复目标拒绝，不参与运行时模板叠加。
+
+所有 domain/action 在公共 assets 中各有独立 TOML，初始化按普通资源复制到 configs/action/catalog。运行期三情景共用同一 ConfigDocumentSet、候选校验与显式 reload；没有 owner fragments 拼接或 Reflection 包资源装载旁路。Action owner 按 visibility 编译情景视图，grants 与受约束 Service 决定真实权限；SDK/Endpoint 可按情景查询有效集合。配置命名使用 agent/reflection，进程能力使用 execution，公共容量使用 jobs。
+
+init 只安装到不存在或空目录；reset 是显式开发命令，持项目排他 lease，在同级 staging 生成并只保留普通 .env，再以可回滚替换安装。reset 不由 SDK 启动或重构自动执行。start 在创建业务 Engine 前持有 ProjectInstanceLease；HTTP 就绪后发布本机连接描述，退出时清理。
+
+发布验证覆盖 wheel package data、隔离安装和 init，以及本地 fake-provider CLI 的真实配置/provider/Phase/Action 链。真实供应商测试通过独立 external 开关运行。

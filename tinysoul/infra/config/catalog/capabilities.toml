@@ -1,0 +1,765 @@
+[[surface]]
+id = "capabilities.web"
+title = "Web"
+description = "Web search, discovery, fetching, and shared network result limits."
+
+[[surface]]
+id = "capabilities.resource"
+title = "Resource"
+description = "Document conversion, extraction, and generated asset limits."
+
+[[field_group]]
+id = "capabilities.web.general"
+surface = "capabilities.web"
+title = "Web Limits"
+description = "Shared request, source, output, redirect, and user-agent limits for web capabilities."
+
+[[field_group]]
+id = "capabilities.web.search"
+surface = "capabilities.web"
+title = "Kimi Search"
+description = "Configures Kimi-backed web search and its bounded model interaction."
+
+[[field_group]]
+id = "capabilities.web.discovery"
+surface = "capabilities.web"
+title = "Page Discovery"
+description = "Controls bounded multi-page discovery, concurrency, retries, and result size."
+
+[[field_group]]
+id = "capabilities.web.fetchers"
+surface = "capabilities.web"
+title = "Content Fetchers"
+description = "Selects the deterministic page extraction implementations registered as Actions."
+
+[[field_group]]
+id = "capabilities.resource.general"
+surface = "capabilities.resource"
+title = "Resource Limits"
+description = "Shared source, output, asset, and document boundaries for resource conversion."
+
+[[field_group]]
+id = "capabilities.resource.pdf"
+surface = "capabilities.resource"
+title = "PDF Processing"
+description = "Controls PDF page limits and page-image rendering policy."
+
+[[field_group]]
+id = "capabilities.resource.markitdown"
+surface = "capabilities.resource"
+title = "MarkItDown"
+description = "Configures document conversion and related asset extraction through MarkItDown."
+
+[[field_group]]
+id = "capabilities.resource.pypdf"
+surface = "capabilities.resource"
+title = "PyPDF"
+description = "Configures PDF conversion and related asset extraction through PyPDF."
+
+[[field]]
+path = "capabilities.web.max_source_bytes"
+surface = "capabilities.web"
+group = "capabilities.web.general"
+title = "Maximum Download Bytes"
+description = "Largest web response body accepted before content processing."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.max_output_chars"
+surface = "capabilities.web"
+group = "capabilities.web.general"
+title = "Maximum Stored Output"
+description = "Largest extracted web result that may be written as a workspace resource."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.max_excerpt_chars"
+surface = "capabilities.web"
+group = "capabilities.web.general"
+title = "Excerpt Length"
+description = "Maximum character count retained for each compact web result excerpt."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.request_timeout_seconds"
+surface = "capabilities.web"
+group = "capabilities.web.general"
+title = "Request Timeout"
+description = "Maximum time allowed for one web HTTP request."
+value_kind = "number"
+
+[[field]]
+path = "capabilities.web.max_redirects"
+surface = "capabilities.web"
+group = "capabilities.web.general"
+title = "Maximum Redirects"
+description = "Maximum HTTP redirects followed by a web request."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.user_agent"
+surface = "capabilities.web"
+group = "capabilities.web.general"
+title = "User Agent"
+description = "HTTP User-Agent sent by TinySoul web requests."
+value_kind = "string"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.search_by_kimi.enabled"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Kimi Search"
+description = "Registers the Kimi-backed web search action in the effective Action Catalog."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.web.search_by_kimi.base_url"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Search API Base URL"
+description = "OpenAI-compatible endpoint used by the Kimi search integration."
+value_kind = "string"
+
+[[field]]
+path = "capabilities.web.search_by_kimi.api_key_env"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Search Credential Name"
+description = "Dotenv variable that contains the Kimi search API key."
+value_kind = "string"
+credential_reference = true
+
+[[field]]
+path = "capabilities.web.search_by_kimi.model"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Search Model"
+description = "Provider model identifier used for tool-assisted web search."
+value_kind = "enum"
+choices = [
+  { value = "kimi-k2.5", label = "kimi-k2.5" },
+  { value = "kimi-k2.6", label = "kimi-k2.6" },
+]
+
+[[field]]
+path = "capabilities.web.search_by_kimi.max_query_chars"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Maximum Query Length"
+description = "Largest search instruction accepted by the Kimi search action."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.search_by_kimi.max_result_chars"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Maximum Search Result"
+description = "Largest complete search result retained as a workspace resource."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.search_by_kimi.max_inline_chars"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Inline Search Result"
+description = "Maximum search result characters returned directly in the Action result."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.search_by_kimi.max_tool_rounds"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Maximum Search Rounds"
+description = "Maximum provider tool-call rounds used to complete one search."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.search_by_kimi.max_search_tokens"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Search Token Budget"
+description = "Maximum provider search-tool token budget for one action."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.search_by_kimi.max_output_tokens"
+surface = "capabilities.web"
+group = "capabilities.web.search"
+title = "Search Output Tokens"
+description = "Maximum provider generation tokens for one search result."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.discover_pages.enabled"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Page Discovery"
+description = "Registers bounded same-origin page discovery in the effective Action Catalog."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_visit_depth"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Visit Depth"
+description = "Maximum same-origin link depth visited from the seed page."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_pages"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Maximum Pages"
+description = "Maximum pages fetched during one discovery action."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_candidates"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Maximum Candidates"
+description = "Maximum discovered page candidates retained in the result."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_links_per_page"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Links Per Page"
+description = "Maximum eligible links considered from one fetched page."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_result_chars"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Discovery Result Size"
+description = "Largest complete discovery result written to the workspace."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_inline_chars"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Inline Discovery Size"
+description = "Maximum discovery result characters returned directly to the Agent."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_concurrency"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Discovery Concurrency"
+description = "Maximum concurrent page requests during discovery."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_tasks_per_minute"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Discovery Rate"
+description = "Maximum page request tasks started per minute."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_request_retries"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Request Retries"
+description = "Maximum retries for a failed page request."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.discover_pages.max_crawl_seconds"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Discovery Runtime"
+description = "Maximum total runtime for one page discovery action."
+value_kind = "number"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.discover_pages.allow_query_links"
+surface = "capabilities.web"
+group = "capabilities.web.discovery"
+title = "Follow Query Links"
+description = "Allows discovery to expand links that differ through URL query parameters."
+value_kind = "boolean"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.web.fetch_with_defuddle.enabled"
+surface = "capabilities.web"
+group = "capabilities.web.fetchers"
+title = "Defuddle Fetch"
+description = "Registers Defuddle-based readable page extraction."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.web.fetch_with_trafilatura.enabled"
+surface = "capabilities.web"
+group = "capabilities.web.fetchers"
+title = "Trafilatura Fetch"
+description = "Registers Trafilatura-based readable page extraction."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.resource.max_source_bytes"
+surface = "capabilities.resource"
+group = "capabilities.resource.general"
+title = "Maximum Source Bytes"
+description = "Largest source document accepted by a conversion action."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.resource.max_output_chars"
+surface = "capabilities.resource"
+group = "capabilities.resource.general"
+title = "Maximum Output Characters"
+description = "Largest converted Markdown resource that may be committed."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.resource.max_assets"
+surface = "capabilities.resource"
+group = "capabilities.resource.general"
+title = "Maximum Assets"
+description = "Maximum extracted assets retained from one source document."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.resource.max_total_asset_bytes"
+surface = "capabilities.resource"
+group = "capabilities.resource.general"
+title = "Total Asset Bytes"
+description = "Maximum combined size of assets extracted from one document."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.resource.max_pdf_pages"
+surface = "capabilities.resource"
+group = "capabilities.resource.pdf"
+title = "Maximum PDF Pages"
+description = "Maximum page count accepted by PDF conversion."
+value_kind = "integer"
+importance = "advanced"
+
+[[field]]
+path = "capabilities.resource.render_pdf_pages"
+surface = "capabilities.resource"
+group = "capabilities.resource.pdf"
+title = "PDF Page Rendering"
+description = "Controls when PDF pages are rendered as image assets."
+value_kind = "enum"
+choices = [
+  { value = "disabled", label = "Disabled" },
+  { value = "on_no_text", label = "When no text is extracted" },
+]
+
+[[field]]
+path = "capabilities.resource.convert_with_markitdown.enabled"
+surface = "capabilities.resource"
+group = "capabilities.resource.markitdown"
+title = "MarkItDown Conversion"
+description = "Registers document conversion backed by MarkItDown."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.resource.convert_with_markitdown.formats"
+surface = "capabilities.resource"
+group = "capabilities.resource.markitdown"
+title = "MarkItDown Formats"
+description = "Source file formats accepted by the MarkItDown converter."
+value_kind = "string_list"
+
+[[field]]
+path = "capabilities.resource.convert_with_markitdown.extract_images"
+surface = "capabilities.resource"
+group = "capabilities.resource.markitdown"
+title = "Extract Images"
+description = "Keeps embedded images as related workspace assets during MarkItDown conversion."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.resource.convert_with_markitdown.extract_attachments"
+surface = "capabilities.resource"
+group = "capabilities.resource.markitdown"
+title = "Extract Attachments"
+description = "Keeps embedded attachments as related workspace assets during MarkItDown conversion."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.resource.convert_with_pypdf.enabled"
+surface = "capabilities.resource"
+group = "capabilities.resource.pypdf"
+title = "PyPDF Conversion"
+description = "Registers PDF conversion backed by PyPDF."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.resource.convert_with_pypdf.extract_images"
+surface = "capabilities.resource"
+group = "capabilities.resource.pypdf"
+title = "Extract PDF Images"
+description = "Keeps images extracted from PDF pages as related workspace assets."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.resource.convert_with_pypdf.extract_attachments"
+surface = "capabilities.resource"
+group = "capabilities.resource.pypdf"
+title = "Extract PDF Attachments"
+description = "Keeps embedded PDF attachments as related workspace assets."
+value_kind = "boolean"
+
+[[surface]]
+id = "capabilities.subagent"
+title = "External Agents"
+description = "Explicit external capability bindings and bounded execution."
+
+[[field_group]]
+id = "capabilities.subagent.limits"
+surface = "capabilities.subagent"
+title = "Limits"
+description = "Shared local capacity and execution bounds."
+
+[[field_group]]
+id = "capabilities.subagent.bindings"
+surface = "capabilities.subagent"
+title = "Connections"
+description = "Explicit connection settings; credentials use environment references."
+
+[[collection]]
+id = "capabilities.subagent.agents"
+surface = "capabilities.subagent"
+root = "capabilities.subagent.agents"
+title = "ACP Agent"
+description = "A named configured target. New entries are disabled until configured."
+identity = { title = "Identity", description = "Stable configuration identity without dots or outer whitespace." }
+create_source = "project:configs/capabilities/subagent.toml"
+create_template = { enabled = false, description = "", command = "", args = [], auto_approve = false, env = {  }, env_refs = {  } }
+delete_policy = "all"
+
+[[field]]
+path = "capabilities.subagent.max_connections"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.limits"
+title = "Maximum Connections"
+description = "Maximum Connections applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.subagent.connect_timeout_seconds"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.limits"
+title = "Connect Timeout"
+description = "Connect Timeout applied by the capability owner."
+value_kind = "number"
+
+[[field]]
+path = "capabilities.subagent.max_runtime_seconds"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.limits"
+title = "Delegation Runtime"
+description = "Delegation Runtime applied by the capability owner."
+value_kind = "number"
+
+[[field]]
+path = "capabilities.subagent.stop_timeout_seconds"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.limits"
+title = "Stop Timeout"
+description = "Stop Timeout applied by the capability owner."
+value_kind = "number"
+
+[[field]]
+path = "capabilities.subagent.max_output_chars"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.limits"
+title = "Maximum Output Characters"
+description = "Maximum Output Characters applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.subagent.max_collect_chars"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.limits"
+title = "Collected Page Characters"
+description = "Collected Page Characters applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.subagent.max_brief_chars"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.limits"
+title = "Maximum Brief Characters"
+description = "Maximum Brief Characters applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.subagent.agents.*.enabled"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.bindings"
+title = "enabled"
+description = "Configured enabled; interpreted by its capability owner."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.subagent.agents.*.description"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.bindings"
+title = "description"
+description = "Configured description; interpreted by its capability owner."
+value_kind = "string"
+
+[[field]]
+path = "capabilities.subagent.agents.*.command"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.bindings"
+title = "command"
+description = "Configured command; interpreted by its capability owner."
+value_kind = "string"
+
+[[field]]
+path = "capabilities.subagent.agents.*.args"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.bindings"
+title = "args"
+description = "Configured args; interpreted by its capability owner."
+value_kind = "string_list"
+
+[[field]]
+path = "capabilities.subagent.agents.*.env"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.bindings"
+title = "env"
+description = "Configured env; interpreted by its capability owner."
+value_kind = "object"
+
+[[field]]
+path = "capabilities.subagent.agents.*.env_refs"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.bindings"
+title = "env refs"
+description = "Map protocol names to ConfigEnvironment variable names; values are resolved only at assembly."
+value_kind = "object"
+credential_reference = true
+
+[[field]]
+path = "capabilities.subagent.agents.*.auto_approve"
+surface = "capabilities.subagent"
+group = "capabilities.subagent.bindings"
+title = "auto approve"
+description = "Explicitly use the adapter auto-approval mode; otherwise requests go to the parent Agent."
+value_kind = "boolean"
+
+[[surface]]
+id = "capabilities.expand"
+title = "MCP Tools"
+description = "Explicit external capability bindings and bounded execution."
+
+[[field_group]]
+id = "capabilities.expand.limits"
+surface = "capabilities.expand"
+title = "Limits"
+description = "Shared local capacity and execution bounds."
+
+[[field_group]]
+id = "capabilities.expand.bindings"
+surface = "capabilities.expand"
+title = "Connections"
+description = "Explicit connection settings; credentials use environment references."
+
+[[collection]]
+id = "capabilities.expand.servers"
+surface = "capabilities.expand"
+root = "capabilities.expand.servers"
+title = "MCP Server"
+description = "A named configured target. New entries are disabled until configured."
+identity = { title = "Identity", description = "Stable configuration identity without dots or outer whitespace." }
+create_source = "project:configs/capabilities/expand.toml"
+create_template = { enabled = false, description = "", transport = "stdio", command = "", args = [], cwd = "", env = {  }, env_refs = {  }, url = "", headers = {  }, header_refs = {  }, tools_default = true, tools = {  } }
+delete_policy = "all"
+
+[[field]]
+path = "capabilities.expand.timeout_seconds"
+surface = "capabilities.expand"
+group = "capabilities.expand.limits"
+title = "Request Timeout"
+description = "Request Timeout applied by the capability owner."
+value_kind = "number"
+
+[[field]]
+path = "capabilities.expand.max_tools"
+surface = "capabilities.expand"
+group = "capabilities.expand.limits"
+title = "Maximum Tools Per Server"
+description = "Maximum Tools Per Server applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.expand.max_catalog_bytes"
+surface = "capabilities.expand"
+group = "capabilities.expand.limits"
+title = "Maximum Catalog Bytes"
+description = "Maximum Catalog Bytes applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.expand.max_result_bytes"
+surface = "capabilities.expand"
+group = "capabilities.expand.limits"
+title = "Maximum Result Bytes"
+description = "Maximum Result Bytes applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.expand.max_inline_chars"
+surface = "capabilities.expand"
+group = "capabilities.expand.limits"
+title = "Inline Response Characters"
+description = "Inline Response Characters applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.expand.search_max_chars"
+surface = "capabilities.expand"
+group = "capabilities.expand.limits"
+title = "Search Candidate Characters"
+description = "Search Candidate Characters applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.expand.page_size"
+surface = "capabilities.expand"
+group = "capabilities.expand.limits"
+title = "Describe Page Size"
+description = "Describe Page Size applied by the capability owner."
+value_kind = "integer"
+
+[[field]]
+path = "capabilities.expand.servers.*.enabled"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "enabled"
+description = "Configured enabled; interpreted by its capability owner."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.expand.servers.*.description"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "description"
+description = "Configured description; interpreted by its capability owner."
+value_kind = "string"
+
+[[field]]
+path = "capabilities.expand.servers.*.transport"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "transport"
+description = "Configured transport; interpreted by its capability owner."
+value_kind = "enum"
+choices = [{ value = "stdio", label = "Local stdio" }, { value = "streamable_http", label = "Streamable HTTP" }]
+
+[[field]]
+path = "capabilities.expand.servers.*.command"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "command"
+description = "Configured command; interpreted by its capability owner."
+value_kind = "string"
+
+[[field]]
+path = "capabilities.expand.servers.*.args"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "args"
+description = "Configured args; interpreted by its capability owner."
+value_kind = "string_list"
+
+[[field]]
+path = "capabilities.expand.servers.*.cwd"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "cwd"
+description = "Configured cwd; interpreted by its capability owner."
+value_kind = "string"
+
+[[field]]
+path = "capabilities.expand.servers.*.env"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "env"
+description = "Configured env; interpreted by its capability owner."
+value_kind = "object"
+
+[[field]]
+path = "capabilities.expand.servers.*.env_refs"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "env refs"
+description = "Map protocol names to ConfigEnvironment variable names; values are resolved only at assembly."
+value_kind = "object"
+credential_reference = true
+
+[[field]]
+path = "capabilities.expand.servers.*.url"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "url"
+description = "Configured url; interpreted by its capability owner."
+value_kind = "string"
+
+[[field]]
+path = "capabilities.expand.servers.*.headers"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "headers"
+description = "Configured headers; interpreted by its capability owner."
+value_kind = "object"
+
+[[field]]
+path = "capabilities.expand.servers.*.header_refs"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "header refs"
+description = "Map protocol names to ConfigEnvironment variable names; values are resolved only at assembly."
+value_kind = "object"
+credential_reference = true
+
+[[field]]
+path = "capabilities.expand.servers.*.tools_default"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "tools default"
+description = "Configured tools default; interpreted by its capability owner."
+value_kind = "boolean"
+
+[[field]]
+path = "capabilities.expand.servers.*.tools"
+surface = "capabilities.expand"
+group = "capabilities.expand.bindings"
+title = "tools"
+description = "Whole map of exact remote tool names to booleans; per-tool choices override tools_default."
+value_kind = "object"

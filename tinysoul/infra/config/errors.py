@@ -1,0 +1,41 @@
+"""Configuration error types."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from tinysoul.infra.json import JsonObject
+
+
+@dataclass
+class ConfigError(Exception):
+    """Error raised when configuration cannot be loaded or converted."""
+
+    message: str
+    key: str = ""
+    source: str = ""
+    value: object = None
+    expected: str = ""
+
+    def __str__(self) -> str:
+        parts = [self.message]
+        if self.key:
+            parts.append(f"key={self.key}")
+        if self.source:
+            parts.append(f"source={self.source}")
+        if self.expected:
+            parts.append(f"expected={self.expected}")
+        if self.value is not None:
+            parts.append(f"value={self.value!r}")
+        return " | ".join(parts)
+
+
+class ConfigCatalogError(Exception):
+    """Raised when the package-owned configuration catalog is invalid."""
+
+
+def config_error_payload(error: ConfigError) -> JsonObject:
+    """Project bounded schema diagnostics, excluding source, value and message."""
+
+    return {"key": error.key[:256], "expected": error.expected[:256]}
+

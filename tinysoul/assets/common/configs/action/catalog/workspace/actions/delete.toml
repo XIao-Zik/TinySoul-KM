@@ -1,0 +1,30 @@
+name = "workspace.delete"
+domain = "workspace"
+
+[tool]
+description = "Remove one resource from the active Workspace by moving it to recoverable Trash."
+
+[tool.schema]
+type = "object"
+required = ["target_ref"]
+additionalProperties = false
+
+[tool.schema.properties.target_ref]
+type = "string"
+description = "Target workspace resource ref such as workspace:docs/task.md."
+
+[semantic]
+use_when = ["Need to remove a workspace resource that is no longer useful"]
+avoid_when = ["The file may still be needed as task evidence or output"]
+effects = ["modifying"]
+examples = ["Delete workspace:tmp/draft.md after producing the final document"]
+
+[runtime]
+parallel_policy = "serial"
+
+[runtime.hooks]
+normalize = []
+execute = []
+
+[execution]
+executor = "workspace.delete"

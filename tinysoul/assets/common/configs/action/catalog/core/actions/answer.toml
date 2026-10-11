@@ -1,0 +1,69 @@
+name = "core.answer"
+domain = "core"
+
+[tool]
+description = "Produce the user-facing response that concludes the current User Turn, optionally using read-only references."
+
+[tool.schema]
+type = "object"
+required = ["guide_blocks"]
+additionalProperties = false
+
+[tool.schema.properties.guide_blocks]
+type = "array"
+description = "Required answer guidance blocks."
+
+[tool.schema.properties.guide_blocks.items]
+type = "object"
+required = ["text"]
+additionalProperties = false
+
+[tool.schema.properties.guide_blocks.items.properties.label]
+type = "string"
+description = "Optional stable label for this guide block."
+
+[tool.schema.properties.guide_blocks.items.properties.text]
+type = "string"
+description = "Guide text for the final answer task."
+
+[tool.schema.properties.input_blocks]
+type = "array"
+description = "Optional answer-specific input blocks."
+
+[tool.schema.properties.input_blocks.items]
+type = "object"
+required = ["text"]
+additionalProperties = false
+
+[tool.schema.properties.input_blocks.items.properties.label]
+type = "string"
+description = "Optional stable label for this input block."
+
+[tool.schema.properties.input_blocks.items.properties.text]
+type = "string"
+description = "Input text for the final answer task."
+
+[tool.schema.properties.references]
+type = "array"
+description = "Optional read-only resource references to use as answer sources."
+
+[tool.schema.properties.references.items]
+type = "string"
+description = "Read-only resource reference, for example workspace:docs/task.md."
+
+[semantic]
+use_when = ["The current Turn should deliver a result to the user", "Further progress requires a focused user question, confirmation, further instruction, or choice among feasible routes"]
+avoid_when = ["Available actions can still resolve the uncertainty or materially advance the current Turn", "The response would only be hidden reasoning or an interim status"]
+effects = ["read_only"]
+examples = ["Answer the user's direct question after gathering enough context", "Ask the user to choose among consequential alternatives after explaining the tradeoff and offering a recommendation"]
+
+[runtime]
+timeout_seconds = 600
+parallel_policy = "serial"
+
+[runtime.hooks]
+normalize = []
+execute = []
+
+[execution]
+executor = "core.answer"

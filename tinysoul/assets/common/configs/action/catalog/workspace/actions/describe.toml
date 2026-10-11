@@ -1,0 +1,23 @@
+name = "workspace.describe"
+domain = "workspace"
+
+[tool]
+description = "Generate and store a concise semantic description for a directly readable workspace resource."
+schema = { type = "object", properties = { target_ref = { type = "string", description = "A directly readable text or image workspace ref." }, instruction = { type = "string", description = "Optional description focus." } }, required = ["target_ref"], additionalProperties = false }
+
+[semantic]
+use_when = ["A workspace text or image resource needs a semantic description in the manifest"]
+avoid_when = ["The resource is a document that requires conversion", "Only deterministic file metadata is needed"]
+effects = ["read_only"]
+examples = ["Describe workspace:docs/task.md for later Turn discovery"]
+
+[runtime]
+timeout_seconds = 600
+parallel_policy = "serial"
+
+[runtime.hooks]
+normalize = []
+execute = []
+
+[execution]
+executor = "workspace.describe"

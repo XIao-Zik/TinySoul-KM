@@ -1,0 +1,1037 @@
+"""Session ownership, source identity and the shared disclosure contract."""
+
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from tinysoul.infra.json import JsonObject
+from tinysoul.infra.references import ReferenceResolver
+from tinysoul.infra.time import CalendarDay
+from tinysoul.kernel.action import (
+    ActionCall,
+    ActionFramework,
+    ActionResult,
+    ActionResultStatus,
+)
+from tinysoul.kernel.action.call import ExecutionFact, ExecutionState
+from tinysoul.kernel.context import (
+    ContextEngineBuilder,
+    ContextTurnFacts,
+    ContextTurnInput,
+    PromptBlock,
+    TaskPrompt,
+)
+from tinysoul.kernel.context.errors import ContextInspectRequestError
+from tinysoul.kernel.context.segments import TurnInfo
+from tinysoul.kernel.context.signals import build_input_append_signal
+from tinysoul.kernel.loop.outcomes import TurnOutcomeStatus
+from tinysoul.kernel.retrieval.contracts import (
+    OperationKind,
+    QuerySource,
+    RetrievalRequest,
+    SourceKind,
+    TextQuery,
+)
+from tinysoul.kernel.retrieval.operations import SearchSession
+from tinysoul.kernel.retrieval.policy import RetrievalPolicy
+from tinysoul.plugins.session import SessionEngine, SessionSettings
+from tinysoul.plugins.session.annotations.models import (
+    AnnotationKind,
+    AnnotationStatus,
+    OrganizeChange,
+    OrganizeFailureReason,
+    SemanticEdge,
+    SemanticNode,
+    SemanticRelation,
+)
+from tinysoul.plugins.session.errors import (
+    SessionInspectRequestError,
+    SessionInvariantError,
+    SessionIOError,
+)
+from tinysoul.plugins.session.projection import (
+    SessionRefresh,
+    UpdatingSessionProvider,
+    session_segment_registration,
+)
+from tinysoul.plugins.session.records.models import SessionOutputRecord
+from tinysoul.plugins.session.services import SessionOrganizeService, SessionService
+from tinysoul.plugins.session.views.navigation import SessionEvidence
+from tinysoul.runtime import RunLevel, RunScope, SignalBus
+
+from .synthetic import SyntheticAction, completion
+
+DAY = CalendarDay.parse("2026-09-21")
+PRIOR = "session:turn/2026-09-21/1004"
+
+
+def _session(tmp_path: Path, *, budget: int = 24000, page: int = 8000) -> SessionEngine:
+    result = SessionEngine(
+        SessionSettings(
+            root=tmp_path / "session",
+            background_max_chars=budget,
+            inspect_max_chars=page,
+        )
+    )
+    result.initialize_day(DAY)
+    return result
+
+
+def _record(
+    session: SessionEngine, turn: str = "2026-09-21/1004", *, text: str = "initial task"
+) -> None:
+    session.record_turn(
+        completion(turn, ask=text),
+        day=DAY,
+        output=SessionOutputRecord(text=f"answer for {turn}"),
+        status=TurnOutcomeStatus.ANSWERED,
+        exhausted=False,
+    )
+
+
+def _facts() -> ContextTurnFacts:
+    return ContextTurnFacts(
+        "2026-09-21/1000", (ContextTurnInput("new evidence", 1, "initial"),), ()
+    )
+
+
+def _node(
+    ref: str = "local:topic", *, source: str = PRIOR, body: str = "An interpretation"
+) -> SemanticNode:
+    return SemanticNode(ref, AnnotationKind.THREAD, "Topic", body, (source,))
+
+
+def _edge(
+    ref: str,
+    source: str,
+    target: str,
+    relation: SemanticRelation = SemanticRelation.COVERS,
+) -> SemanticEdge:
+    return SemanticEdge(
+        ref, source, target, relation, "A source-backed relationship", (PRIOR,)
+    )
+
+
+def _items(page: JsonObject) -> list[JsonObject]:
+    values = page["items"]
+    assert isinstance(values, list)
+    assert all(isinstance(item, dict) for item in values)
+    return [item for item in values if isinstance(item, dict)]
+
+
+async def test_context_search_uses_session_originals_and_interpretations_after_folding(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _record(session, text="specific-source-evidence " + "long body " * 400)
+    result = session.organize(
+        OrganizeChange((PRIOR,), nodes=(_node(body="special-interpretation"),)),
+        _facts(),
+    )
+    assert result.failure is None
+    context = ContextEngineBuilder(system_text="identity").build()
+    context.register_segment(session_segment_registration(SessionService(session)))
+    context.begin_turn("search previous facts", turn_id="2026-09-21/135")
+    await context.open_segments(DAY.value)
+    context.compress(required_chars=100000)
+    for query, expected in (
+        ("specific-source-evidence", f"{PRIOR}#input/0"),
+        ("special-interpretation", dict(result.created)["local:topic"]),
+    ):
+        request = RetrievalRequest(QuerySource("session", TextQuery(query)))
+        corpus = await context.search_corpus(request, references=ReferenceResolver())
+
+        async def source(_request):
+            return corpus
+
+        page = await SearchSession(
+            action_id="core.context.search",
+            retrieval_policies=(
+                RetrievalPolicy(
+                    "core.context.search", tuple(SourceKind), tuple(OperationKind)
+                ),
+            ),
+            source=source,
+        ).search(request)
+        assert expected in {item.ref for item in page.items}
+        assert query in str((await context.inspect(expected)).to_json())
+    assert session.background_snapshot(DAY).refs == (PRIOR,)
+    await context.close_segments()
+
+
+def test_atomic_annotations_preserve_facts_and_stable_refs(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    _record(session)
+    _record(session, "2026-09-21/1005")
+    history = (session.inspect(PRIOR)).to_json()
+    result = session.organize(
+        OrganizeChange(
+            (PRIOR,),
+            nodes=(_node(), _node("local:branch")),
+            edges=(
+                _edge("local:member", "local:topic", PRIOR),
+                _edge("local:shared", "local:branch", PRIOR),
+                _edge(
+                    "local:fork",
+                    "local:branch",
+                    "local:topic",
+                    SemanticRelation.BRANCHES_FROM,
+                ),
+            ),
+        ),
+        _facts(),
+    )
+    assert result.failure is None
+    refs = dict(result.created)
+    assert len(result.changed_refs) == 5
+    assert (session.inspect(PRIOR)).to_json() == history
+    assert [
+        item["ref"]
+        for item in _items((session.inspect("session:unclassified")).to_json())
+        if item.get("kind") == "child"
+    ] == ["session:turn/2026-09-21/1005"]
+    assert refs["local:branch"] in str((session.inspect(refs["local:topic"])).to_json())
+    assert (
+        str(session.background_snapshot(DAY).items).count("answer for 2026-09-21/1005")
+        == 1
+    )
+
+    old = session.annotation_snapshot()
+    rejected = session.organize(
+        OrganizeChange((PRIOR,), retract_ids=(refs["local:topic"],)), _facts()
+    )
+    assert rejected.failure is OrganizeFailureReason.CONFLICT
+    assert session.annotation_snapshot() == old
+    assert _session(tmp_path).annotation_snapshot() == old
+
+    # A merge is a new entry; old branches and factual identities remain usable.
+    merge = session.organize(
+        OrganizeChange(
+            (refs["local:topic"],),
+            nodes=(_node("local:merge"),),
+            edges=(
+                _edge(
+                    "local:left",
+                    "local:merge",
+                    refs["local:topic"],
+                    SemanticRelation.RESOLVES,
+                ),
+                _edge(
+                    "local:right",
+                    "local:merge",
+                    refs["local:branch"],
+                    SemanticRelation.CONTINUES,
+                ),
+            ),
+        ),
+        _facts(),
+    )
+    assert merge.failure is None
+    assert (session.inspect(PRIOR)).to_json() == history
+    # Explicitly retract every incident relation when removing a branch.
+    edge_refs = tuple(
+        item.ref
+        for item in session.annotation_snapshot().edges
+        if refs["local:topic"] in (item.source, item.target)
+    )
+    result = session.organize(
+        OrganizeChange((PRIOR,), retract_ids=(refs["local:topic"], *edge_refs)),
+        _facts(),
+    )
+    assert result.failure is None
+    removed = session.annotation_snapshot().get(refs["local:topic"])
+    assert removed is not None and removed.status is AnnotationStatus.RETRACTED
+    assert "retracted" in str((session.inspect(refs["local:topic"])).to_json())
+    archive = tmp_path / "archive" / "session"
+    session.archive_day(DAY, target=archive)
+    session.initialize_day(CalendarDay.parse("2026-09-22"))
+    assert session.annotation_snapshot().nodes == ()
+    assert "retracted" in str(
+        (session.archive_view(DAY, root=archive).inspect(refs["local:topic"])).to_json()
+    )
+
+
+def test_organize_failure_does_not_publish_or_hide_storage_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tinysoul.plugins.session.annotations import store
+
+    session = _session(tmp_path)
+    change = OrganizeChange((PRIOR,), nodes=(_node(),))
+    assert (
+        session.organize(change, _facts()).failure is OrganizeFailureReason.NO_HISTORY
+    )
+    _record(session)
+    assert (
+        session.organize(
+            OrganizeChange(
+                (PRIOR,), nodes=(_node(source="session:turn/2026-09-21/1001"),)
+            ),
+            _facts(),
+        ).failure
+        is OrganizeFailureReason.INVALID_SOURCE
+    )
+    assert not (session.root / "map.json").exists()
+    first = session.organize(change, _facts())
+    ref = dict(first.created)["local:topic"]
+    before = (session.root / "map.json").read_bytes()
+    old = session.annotation_snapshot()
+
+    def fail_write(*args: object, **kwargs: object) -> None:
+        raise OSError("test write unavailable")
+
+    monkeypatch.setattr(store, "atomic_write_text", fail_write)
+    with pytest.raises(SessionIOError):
+        session.organize(
+            OrganizeChange((ref,), nodes=(_node(ref, body="replacement"),)), _facts()
+        )
+    assert session.annotation_snapshot() == old
+    assert (session.root / "map.json").read_bytes() == before
+    (session.root / "map.json").write_text("{broken", encoding="utf-8")
+    with pytest.raises(SessionInvariantError):
+        _session(tmp_path)
+
+
+async def test_current_evidence_keeps_occurrence_without_sealing_and_resolves_after_completion(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _record(session)
+    context = ContextEngineBuilder(system_text="identity").build()
+    context.begin_turn("new constraint", turn_id="2026-09-21/1000")
+    await context.open_segments(DAY.value)
+    calls = tuple(
+        ActionCall(f"call_{index}", "core.reason", {}, index + 1) for index in range(3)
+    )
+    context.register_action_calls(calls, cycle_id="c")
+    framework = ActionFramework(
+        "invoke", "batch", RunScope(), "core", turn_id="2026-09-21/1000", cycle_id="c"
+    )
+    context.record_execution(ExecutionFact(calls[0], framework, ExecutionState.STARTED))
+    context.record_action_result(
+        ActionResult.success(
+            call_id="call_1",
+            invoke_id="i1",
+            batch_id="batch",
+            action_name="core.reason",
+            sequence=2,
+            payload={"decision": "accepted"},
+        ),
+        cycle_id="c",
+    )
+    facts = context.current_facts()
+    assert [item.state for item in context.current_facts().actions] == [
+        ExecutionState.STARTED,
+        ExecutionState.SETTLED,
+        ExecutionState.REQUESTED,
+    ]
+    assert SessionEvidence(facts).resolve("turn:trace/2026-09-21/1000#action/0") is None
+    result = session.organize(
+        OrganizeChange(
+            (PRIOR,),
+            nodes=(
+                replace(
+                    _node(),
+                    source_refs=(
+                        "turn:trace/2026-09-21/1000#input/0",
+                        "turn:trace/2026-09-21/1000#action/1",
+                    ),
+                ),
+            ),
+        ),
+        facts,
+    )
+    assert result.failure is None
+    ref = dict(result.created)["local:topic"]
+    node = session.annotation_snapshot().get(ref)
+    assert node is not None and node.source_refs == (
+        "session:turn/2026-09-21/1000#input/0",
+        "session:turn/2026-09-21/1000#action/1",
+    )
+    assert (
+        session.organize(
+            OrganizeChange(
+                (PRIOR,),
+                edges=(
+                    _edge("local:bad", ref, "session:turn/2026-09-21/1000#input/0"),
+                ),
+            ),
+            facts,
+        ).failure
+        is OrganizeFailureReason.INVALID_SOURCE
+    )
+    live = replace(session.snapshot_view(DAY), evidence=SessionEvidence(facts))
+    assert "active_turn" in str((live.inspect(node.source_refs[1])).to_json())
+    assert "accepted" in str(
+        (live.inspect(node.source_refs[1], query="accepted")).to_json()
+    )
+    assert live.background_snapshot(DAY).refs == (PRIOR,)
+    context.record_execution(
+        ExecutionFact(calls[0], framework, ExecutionState.CANCELLED)
+    )
+    completed = context.end_turn()
+    await context.close_segments()
+    session.record_turn(
+        completed,
+        day=DAY,
+        output=None,
+        status=TurnOutcomeStatus.CANCELLED,
+        exhausted=False,
+    )
+    resolved = _items((session.inspect(node.source_refs[1])).to_json())[0]
+    assert resolved["result"] == {"decision": "accepted"}
+    assert "source_state" not in resolved
+
+
+async def test_update_is_prepared_then_installed_without_expanding_history(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path)
+    _record(session)
+    provider = UpdatingSessionProvider(
+        SessionService(session), SessionOrganizeService(session), _facts
+    )
+    segment = await provider.open(TurnInfo("2026-09-21/1000", DAY.value))
+    original = segment.render()
+    result = session.organize(
+        OrganizeChange((PRIOR,), nodes=(_node(body="installed interpretation"),)),
+        _facts(),
+    )
+    ref = dict(result.created)["local:topic"]
+    _record(session, "2026-09-21/1003")
+    prepared = await segment.prepare((SessionRefresh(),))
+    assert segment.render() == original
+    with pytest.raises(ContextInspectRequestError):
+        (await segment.inspect(ref)).to_json()
+    segment.install(prepared)
+    assert "installed interpretation" in str(segment.render())
+    assert segment.seal()["refs"] == [PRIOR]
+    assert "session:turn/2026-09-21/1003" not in str(
+        (await segment.inspect("session:history")).to_json()
+    )
+    assert not hasattr(SessionService(session), "organize")
+
+
+def test_annotation_query_uses_turn_scope_and_leaf_scope(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    session.record_turn(
+        completion(
+            "2026-09-21/1004",
+            ask="user-only-marker",
+            working={"milestones": [{"state": "blocked", "text": "working-marker"}]},
+            actions=(
+                SyntheticAction(
+                    "execution.shell",
+                    request={"command": "specific-command-marker"},
+                    result={"stdout": "action-result-marker"},
+                ),
+                SyntheticAction(
+                    "workspace.read",
+                    status=ActionResultStatus.FAILED,
+                    failure_reason="source_unavailable",
+                ),
+            ),
+        ),
+        day=DAY,
+        output=SessionOutputRecord(text="answer"),
+        status=TurnOutcomeStatus.ANSWERED,
+        exhausted=False,
+    )
+    result = session.organize(
+        OrganizeChange(
+            (PRIOR,),
+            nodes=(
+                replace(
+                    _node("local:turn-topic", source=PRIOR, body="turn topic"),
+                    source_refs=(PRIOR, f"{PRIOR}#action/0"),
+                ),
+                _node(
+                    "local:action-topic",
+                    source=f"{PRIOR}#action/0",
+                    body="action topic",
+                ),
+            ),
+        ),
+        _facts(),
+    )
+    assert result.failure is None
+    refs = dict(result.created)
+
+    for query, suffix in (
+        ("specific-command-marker", "action/0"),
+        ("action-result-marker", "action/0"),
+        ("source_unavailable", "action/1"),
+        ("working-marker", "working"),
+        ("user-only-marker", "input/0"),
+    ):
+        turn_hits = _items(
+            (session.inspect(refs["local:turn-topic"], query=query)).to_json()
+        )
+        assert [item["ref"] for item in turn_hits] == [f"{PRIOR}#{suffix}"]
+        assert turn_hits == _items((session.inspect(PRIOR, query=query)).to_json())
+        assert _items((session.inspect(str(turn_hits[0]["ref"]))).to_json())
+
+    leaf_hits = _items(
+        (
+            session.inspect(refs["local:action-topic"], query="action-result-marker")
+        ).to_json()
+    )
+    assert [item["ref"] for item in leaf_hits] == [f"{PRIOR}#action/0"]
+    for query in ("user-only-marker", "source_unavailable", "working-marker"):
+        assert (
+            _items((session.inspect(refs["local:action-topic"], query=query)).to_json())
+            == []
+        )
+
+
+@pytest.mark.parametrize("status", list(ActionResultStatus))
+async def test_active_action_evidence_matches_completed_inspect_and_query(
+    tmp_path: Path,
+    status: ActionResultStatus,
+) -> None:
+    session = _session(tmp_path)
+    _record(session)
+    context = ContextEngineBuilder(system_text="identity").build()
+    context.begin_turn("active input", turn_id="2026-09-21/1000")
+    await context.open_segments(DAY.value)
+    success = status is ActionResultStatus.SUCCESS
+    source = completion(
+        "2026-09-21/1000",
+        actions=(
+            SyntheticAction(
+                "workspace.read",
+                request={"ref": "workspace:request.md"},
+                result={"read": True} if success else {},
+                status=status,
+                failure_reason="source_unavailable",
+                references=("workspace:report.md",) if success else (),
+            ),
+        ),
+    )
+    action = source.trace.actions[0]
+    context.register_action_calls((action.call,), cycle_id="cycle")
+    assert action.result is not None
+    context.record_action_result(action.result, cycle_id="cycle")
+    provider = UpdatingSessionProvider(
+        SessionService(session), SessionOrganizeService(session), context.current_facts
+    )
+    segment = await provider.open(TurnInfo("2026-09-21/1000", DAY.value))
+    facts = context.current_facts()
+    result = session.organize(
+        OrganizeChange(
+            (PRIOR,),
+            nodes=(
+                _node(
+                    "local:evidence",
+                    source="turn:trace/2026-09-21/1000#action/0",
+                ),
+            ),
+        ),
+        facts,
+    )
+    assert result.failure is None
+    ref = dict(result.created)["local:evidence"]
+    segment.install(await segment.prepare((SessionRefresh(),)))
+    leaf_ref = "session:turn/2026-09-21/1000#action/0"
+    active = _items((await segment.inspect(leaf_ref)).to_json())[0]
+    assert active["source_state"] == "active_turn"
+    assert active["outcome"] == status.value
+    if success:
+        assert active["result"] == {"read": True}
+        assert active["references"] == ["workspace:report.md"]
+    else:
+        assert action.result.failure is not None
+        assert active["failure"] == action.result.failure.to_json()
+    query = "workspace:report.md" if success else "source_unavailable"
+    for target in (ref, leaf_ref):
+        hits = _items((await segment.inspect(target, query=query)).to_json())
+        assert [item["ref"] for item in hits] == [leaf_ref]
+    assert segment.seal()["refs"] == [PRIOR]
+    assert "session:turn/2026-09-21/1000" not in str(
+        (await segment.inspect("session:history")).to_json()
+    )
+    with pytest.raises(ContextInspectRequestError):
+        (await segment.inspect("session:turn/2026-09-21/1000")).to_json()
+    assert context.current_facts() == facts
+    completed = context.end_turn()
+    await segment.close()
+    await context.close_segments()
+    session.record_turn(
+        completed,
+        day=DAY,
+        output=None,
+        status=TurnOutcomeStatus.STOPPED,
+        exhausted=False,
+    )
+    historical = _items((session.inspect(leaf_ref)).to_json())[0]
+    assert active.pop("source_state") == "active_turn"
+    assert active == historical
+    hits = _items((session.inspect(ref, query=query)).to_json())
+    assert [item["ref"] for item in hits] == [leaf_ref]
+
+
+@pytest.mark.parametrize("choice", [True, False])
+async def test_long_reply_has_the_same_context_through_all_reading_routes(
+    tmp_path: Path,
+    choice: bool,
+) -> None:
+    from tinysoul.infra.json import dumps_json
+    from tinysoul.kernel.action.planning.rendering import ActionResultRenderer
+    from tinysoul.kernel.context.signals import build_trace_action_result_signal
+    from tinysoul.kernel.interaction import AnswerKind, QuestionAnswer, QuestionContent
+    from tinysoul.kernel.retrieval.contracts import DirectorySource
+    from tinysoul.plugins.session.views.background import render_background
+
+    session = _session(tmp_path, page=2048, budget=64000)
+    _record(session)
+    context = (
+        ContextEngineBuilder(system_text="identity")
+        .with_trace_inspect_max_chars(2048)
+        .build()
+    )
+    turn_id = "2026-09-21/1010"
+    context.begin_turn("review evidence", turn_id=turn_id)
+    await context.open_segments(DAY.value)
+    question = QuestionContent.from_json(
+        {
+            "question": "Keep the document?",
+            "details": "Evidence context. " * 100,
+            "options": [
+                {
+                    "id": "keep",
+                    "label": "Keep full text",
+                    "description": "Retain examples. " * 90,
+                }
+            ],
+        }
+    )
+    answer = (
+        QuestionAnswer(
+            AnswerKind.CHOICE, option_id="keep", comment="Citation detail. " * 220
+        )
+        if choice
+        else QuestionAnswer(AnswerKind.TEXT, text="Keep annotated text. " * 220)
+    )
+    user_text = question.answer_text(answer)
+    call = ActionCall("ask", "core.ask", question.to_json(), 1)
+    context.register_action_calls((call,), cycle_id="c")
+    result = ActionResult.success(
+        call_id="ask",
+        invoke_id="ask",
+        batch_id="batch",
+        action_name="core.ask",
+        sequence=1,
+        payload=question.to_json(),
+        model_text=question.narrative(),
+    )
+    context.record_action_result(result, cycle_id="c")
+    scope = RunScope().push(RunLevel.TURN, turn_id)
+    bus = SignalBus()
+    bus.emit(
+        build_trace_action_result_signal(
+            ActionResultRenderer().render_tool_result(result).visible_message,
+            scope=scope,
+            source="test",
+            cycle_id="c",
+        )
+    )
+    bus.emit(
+        build_input_append_signal(
+            user_text,
+            scope=scope,
+            source="test",
+            reply_to=result.result_id,
+            answer=answer,
+        )
+    )
+    await context.consume_signals(bus)
+    context.merge_pending_inputs()
+    root = f"turn:trace/{turn_id}"
+    query = "Citation detail." if choice else "Keep annotated text."
+    hits = (await context.inspect(root, query=query)).items
+    assert len(hits) == 1
+    entry_ref = hits[0].unit.ref
+    expected = question.reply_projection(answer)
+
+    def check_reply(pages, target):
+        parts = [
+            part
+            for page in pages
+            for part in page.items
+            if part.unit.ref == target and part.unit.data.get("kind") != "child"
+        ]
+        assert len(parts) > 2
+        assert (
+            "".join(part.unit.text[part.start : part.end] for part in parts)
+            == expected.text
+        )
+        assert parts[0].start == 0 and parts[-1].end == len(expected.text)
+        assert all(left.end == right.start for left, right in zip(parts, parts[1:]))
+        late_start = expected.text.index("User comment:" if choice else "User answer:")
+        assert any(part.start > late_start for part in parts)
+        for part in parts:
+            assert question.question in part.title
+            assert (
+                "Keep full text" if choice else "Keep annotated text."
+            ) in part.title
+            if part.start >= late_start:
+                assert ("User comment" if choice else "User answer") in part.title
+        for page in pages:
+            assert len(dumps_json(page.to_json())) <= 2048
+            assert len(page.model_text) <= 2048
+
+    for ref in (f"{root}#input/1", entry_ref):
+        pages, token = [], None
+        while True:
+            page = await context.inspect(ref, continuation=token)
+            pages.append(page)
+            token = page.next_continuation
+            if token is None:
+                break
+        check_reply(pages, ref)
+
+    corpus = await context.search_corpus(
+        RetrievalRequest(DirectorySource("trace")),
+        references=ReferenceResolver(),
+    )
+    assert all(
+        expected.title == item.title
+        for item in corpus.candidates
+        if item.ref in {entry_ref, f"{root}#input/1"}
+    )
+    facts = context.current_facts()
+    organized = session.organize(
+        OrganizeChange(
+            (PRIOR,),
+            nodes=(
+                _node("local:reply", source=f"{root}#input/1", body="Reading decision"),
+            ),
+        ),
+        facts,
+    )
+    assert organized.failure is None
+    view = replace(session.snapshot_view(DAY), evidence=SessionEvidence(facts))
+    target = f"session:turn/{turn_id}#input/1"
+    pages, token = [], None
+    while True:
+        page = view.inspect(target, continuation=token)
+        pages.append(page)
+        token = page.next_continuation
+        if token is None:
+            break
+    check_reply(pages, target)
+    assert expected.title in view.inspect(target, query=query).model_text
+    assert view.search_entries((target,))[0].title == expected.title
+
+    session.record_turn(
+        context.end_turn(),
+        day=DAY,
+        output=None,
+        status=TurnOutcomeStatus.STOPPED,
+        exhausted=False,
+    )
+    await context.close_segments()
+    view = session.snapshot_view(DAY)
+    for ref in (target, f"session:turn/{turn_id}"):
+        pages, token = [], None
+        while True:
+            page = view.inspect(ref, continuation=token)
+            pages.append(page)
+            token = page.next_continuation
+            if token is None:
+                break
+        check_reply(pages, target)
+    history = session.background_snapshot(DAY)
+    turn = next(
+        item for item in history.items if item.item_id == f"session:turn/{turn_id}"
+    )
+    assert question.narrative() in render_background(turn.content)
+    assert expected.text in render_background(turn.content)
+    interactions = turn.content["interactions"]
+    assert isinstance(interactions, list)
+    assert [item["role"] for item in interactions if isinstance(item, dict)] == [
+        "user.input",
+        "agent.question",
+        "user.reply",
+    ]
+    assert isinstance(interactions[-1], dict) and interactions[-1]["text"] == user_text
+
+
+async def test_multiple_complete_dialogues_share_background_and_inspection(
+    tmp_path: Path,
+) -> None:
+    from tinysoul.kernel.interaction import AnswerKind, QuestionAnswer
+
+    session = _session(tmp_path)
+    context = ContextEngineBuilder(system_text="identity").build()
+    for index in range(3):
+        turn_id = f"2026-09-21/{index + 1}"
+        context.begin_turn(f"original request {index}", turn_id=turn_id)
+        await context.open_segments(DAY.value)
+        scope = RunScope().push(RunLevel.TURN, turn_id)
+        bus = SignalBus()
+        reason = ActionCall("reason", "core.reason", {}, 1)
+        question = ActionCall("question", "core.ask", {}, 2)
+        context.register_action_calls((reason, question), cycle_id="c")
+        context.record_action_result(
+            ActionResult.success(
+                call_id="reason",
+                invoke_id="reason",
+                batch_id="batch",
+                action_name="core.reason",
+                sequence=1,
+                payload={"decision": "use the existing timer"},
+            ),
+            cycle_id="c",
+        )
+        bus.emit(
+            build_input_append_signal(
+                f"extra constraint {index}", scope=scope, source="test"
+            )
+        )
+        await context.consume_signals(bus)
+        context.merge_pending_inputs()
+        result = ActionResult.success(
+            call_id="question",
+            invoke_id="question",
+            batch_id="batch",
+            action_name="core.ask",
+            sequence=2,
+            payload={
+                "question": "Which strategy?",
+                "options": [
+                    {"id": "a", "label": "scheduled"},
+                    {
+                        "id": "b",
+                        "label": "on demand",
+                        "description": "Run only when requested",
+                    },
+                ],
+            },
+        )
+        context.record_action_result(result, cycle_id="c")
+        bus.emit(
+            build_input_append_signal(
+                "second option",
+                scope=scope,
+                source="test",
+                reply_to=result.result_id,
+                answer=QuestionAnswer(
+                    AnswerKind.CHOICE, option_id="b", comment="Keep manual control"
+                ),
+            )
+        )
+        await context.consume_signals(bus)
+        context.merge_pending_inputs()
+        followup = ActionCall("followup", "core.ask", {}, 1)
+        context.register_action_calls((followup,), cycle_id="followup")
+        followup_result = ActionResult.success(
+            call_id="followup",
+            invoke_id="followup",
+            batch_id="followup",
+            action_name="core.ask",
+            sequence=1,
+            payload={
+                "question": "Apply now?",
+                "options": [
+                    {"id": "a", "label": "yes"},
+                    {"id": "b", "label": "no"},
+                ],
+            },
+        )
+        context.record_action_result(followup_result, cycle_id="followup")
+        bus.emit(
+            build_input_append_signal(
+                "keep the original limit", scope=scope, source="test"
+            )
+        )
+        bus.emit(
+            build_input_append_signal(
+                "yes", scope=scope, source="test", reply_to=followup_result.result_id
+            )
+        )
+        await context.consume_signals(bus)
+        context.merge_pending_inputs()
+        session.record_turn(
+            context.end_turn(),
+            day=DAY,
+            output=SessionOutputRecord(text=f"confirmed answer {index}"),
+            status=TurnOutcomeStatus.ANSWERED,
+            exhausted=False,
+        )
+        await context.close_segments()
+    snapshot = session.background_snapshot(DAY)
+    assert len(snapshot.items) == 4
+    for index, item in enumerate(snapshot.items[1:]):
+        interactions = item.content["interactions"]
+        assert isinstance(interactions, list)
+        projected = [value for value in interactions if isinstance(value, dict)]
+        assert [value["role"] for value in projected] == [
+            "user.input",
+            "agent.reason",
+            "user.append",
+            "agent.question",
+            "user.reply",
+            "agent.question",
+            "user.append",
+            "user.reply",
+            "agent.output",
+        ]
+        assert projected[0]["text"] == f"original request {index}"
+        assert projected[2]["text"] == f"extra constraint {index}"
+        options = projected[3]["options"]
+        assert isinstance(options, list)
+        assert [item["label"] for item in options if isinstance(item, dict)] == [
+            "scheduled",
+            "on demand",
+        ]
+        assert projected[4]["reply_to"] == projected[3]["ref"]
+        options = projected[5]["options"]
+        assert isinstance(options, list)
+        assert [item["label"] for item in options if isinstance(item, dict)] == [
+            "yes",
+            "no",
+        ]
+        assert "reply_to" not in projected[6]
+        assert projected[7]["reply_to"] == projected[5]["ref"]
+        assert projected[1]["result"] == {"decision": "use the existing timer"}
+        inspected = [
+            value
+            for value in _items((session.inspect(item.item_id)).to_json())
+            if value.get("kind") == "interaction"
+        ]
+        assert len(projected) == len(inspected)
+        for original, displayed in zip(projected, inspected):
+            assert all(displayed[key] == value for key, value in original.items())
+            assert displayed["narrative"]
+
+    context.register_segment(session_segment_registration(SessionService(session)))
+    context.begin_turn("review prior dialogues", turn_id="2026-09-21/683")
+    await context.open_segments(DAY.value)
+    stack = context.compose(
+        TaskPrompt(guide_blocks=(PromptBlock.from_text("task", "review"),))
+    )
+    session_messages = tuple(
+        message for message in stack.messages if message.label.startswith("session:")
+    )
+    rendered = "\n".join(item.render() for item in snapshot.items)
+    assert "Which strategy?" in rendered
+    assert "Run only when requested" in rendered
+    assert "Keep manual control" in rendered
+    assert "use the existing timer" in rendered
+    assert "delivery" not in rendered and "invoke_id" not in rendered
+    assert (
+        rendered.index("original request 0")
+        < rendered.index("Which strategy?")
+        < rendered.index("Keep manual control")
+        < rendered.index("confirmed answer 0")
+    )
+    for index in range(3):
+        assert str(session_messages).count(f"original request {index}") == 1
+        assert str(session_messages).count(f"extra constraint {index}") == 1
+        assert str(session_messages).count(f"confirmed answer {index}") == 1
+    context.end_turn()
+    await context.close_segments()
+    _record(session, "2026-09-21/1002", text="long input " * 4000)
+    bounded = session.background_snapshot(DAY)
+    assert sum(len(item.render()) for item in bounded.items) <= bounded.max_chars
+    giant = next(
+        item for item in bounded.items if item.item_id.endswith("2026-09-21/1002")
+    )
+    assert giant.content["folded"] is True
+    assert "excerpted" in str(giant.content)
+    assert (
+        "next_continuation"
+        in (session.inspect("session:turn/2026-09-21/1002")).to_json()
+    )
+
+
+def test_pagination_depends_on_read_content_and_query_scope(tmp_path: Path) -> None:
+    session = _session(tmp_path, page=1024)
+    _record(session, text="evidence " * 400)
+    result = session.organize(
+        OrganizeChange(
+            (PRIOR,),
+            nodes=(
+                _node(body="target " * 250),
+                _node("local:other", body="unrelated interpretation"),
+            ),
+            edges=(
+                _edge(
+                    "local:related",
+                    "local:topic",
+                    "local:other",
+                    SemanticRelation.SUPPORTS,
+                ),
+            ),
+        ),
+        _facts(),
+    )
+    refs = dict(result.created)
+    target, other = refs["local:topic"], refs["local:other"]
+    frozen = session.snapshot_view(DAY)
+    token = (frozen.inspect(target)).to_json()["next_continuation"]
+    factual = (frozen.inspect(PRIOR)).to_json()["next_continuation"]
+    assert isinstance(token, str) and isinstance(factual, str)
+    session.organize(
+        OrganizeChange((other,), nodes=(_node(other, body="independent change"),)),
+        _facts(),
+    )
+    assert (session.inspect(target, continuation=token)).to_json() == (
+        frozen.inspect(target, continuation=token)
+    ).to_json()
+    session.organize(
+        OrganizeChange((target,), nodes=(_node(target, body="new understanding"),)),
+        _facts(),
+    )
+    with pytest.raises(SessionInspectRequestError):
+        (session.inspect(target, continuation=token)).to_json()
+    assert (session.inspect(PRIOR, continuation=factual)).to_json() == (
+        frozen.inspect(PRIOR, continuation=factual)
+    ).to_json()
+    assert (session.inspect(target, query="independent")).to_json()["items"] == []
+    assert "session:turn/2026-09-21/1004#input/0" in str(
+        (session.inspect("session:map", query="evidence")).to_json()
+    )
+
+
+async def test_map_and_interactions_share_budget_and_reclaim_stays_folded_after_update(
+    tmp_path: Path,
+) -> None:
+    session = _session(tmp_path, budget=5000)
+    for index in range(7):
+        _record(
+            session, f"2026-09-21/{index + 1}", text=f"user {index} " + "text " * 80
+        )
+    prior = "session:turn/2026-09-21/1"
+    result = session.organize(
+        OrganizeChange(
+            (prior,),
+            nodes=tuple(
+                _node(
+                    f"local:n_{index}",
+                    source=prior,
+                    body=f"topic {index} " + "detail " * 300,
+                )
+                for index in range(12)
+            ),
+        ),
+        _facts(),
+    )
+    assert result.failure is None
+    provider = UpdatingSessionProvider(
+        SessionService(session), SessionOrganizeService(session), _facts
+    )
+    segment = await provider.open(TurnInfo("2026-09-21/1000", DAY.value))
+    original = segment.render()
+    snapshot = session.background_snapshot(DAY)
+    assert sum(len(item.render()) for item in snapshot.items) <= 5000
+    assert len([item for item in snapshot.items if "interactions" in item.content]) >= 2
+    assert segment.reclaim(10000).reclaimed_chars > 0
+    folded = segment.render()
+    assert len(str(folded)) < len(str(original))
+    segment.install(await segment.prepare((SessionRefresh(),)))
+    assert len(str(segment.render())) < len(str(original))
+    assert "session:topics" in str(segment.render())
+    assert "user 0" in str((await segment.inspect(prior)).to_json())

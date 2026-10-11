@@ -1,0 +1,106 @@
+# Context 设计
+
+内部 segments 区分段协议、注册声明与活动集合；builtin 提供内核自有 Inputs/Trace/Working，projection 负责组合与引用路由，control 负责模型侧控制意图。外部段由所属插件维护，目录分层不改变 ContextEngine 的单一消费入口。
+
+## 定位
+
+Context 拥有一个活动 Turn 的模型语境。内核维护 User Inputs、plan 与 TurnTraceHeap；Workspace 与 Session 通过独立注册段维护本轮资源投影和历史视图。Session 固定 prior-Turn 来源集合，解释快照可经 owner 更新；地图引用与线性交互正文共用同一段和预算。Home/Memory 的目录、加载视图和刷新也属于各自的 Heap 段。Context 不拥有跨 Turn 历史、语义注释、Workspace 文件、Home 内容或 Memory 文件。
+
+## MessageStack
+
+Context 继续定义 TaskPrompt、PromptBlock 和来源协议。代码定义的 Control Tool 说明及可修正反馈从 `prompts/kernel/context.py` 取得；schema、Signal 消费、段投影和消息装配仍属于 Context，见[固定模型文案设计](prompts.md)。
+
+Composer 只接收带段描述的消息投影，按 Background → Trace → Working 槽位、段 order 和 id 排序，最后附加 TaskPrompt。当前装配顺序为：
+
+1. system identity；
+2. Session Background；
+3. 当前 Turn 的有序 User Inputs；
+4. Home、Memory 等通用 Background；
+5. TurnTraceHeap 当前可见内容；
+6. plan 的 milestones/todos，以及独立 workspace 段的资源摘要；
+7. 当前 LLM Task 的 prompt overlay。
+
+除 system identity 外，框架构造的语境使用 user role；TinySoul ToolResult 仍按内部工具消息语义表达，并由 provider adapter 决定供应商协议映射。前端在 model Observation 中看到的 MessageStack 就是实际交给 LLM 层的构造结果，不另建 Context REST snapshot。MessageOrigin 记录 segment、owner、slot、shape、实际 message indices 与 refs；resolved_references 保留动态绑定。
+
+## Background 与 Working
+
+Session provider 在段 open 时读取固定的历史事实集合；模型投影只在 Session 自身超过水位时折叠，保留地图入口与全部事实引用，Context 不能任意削减它。通用 Background 每 Turn 重建；默认 Home 条目、按需加载的 Top 引用 和 Memory 动态投影都属于当前 Turn。User/Home Reflection 装配不可逐出的 `memory:current + optional memory:latest`，Memory Reflection 装配不可逐出的 `memory:target + optional memory:latest`；latest 是严格早于 Context 活动日期的最近 daily，缺失时省略。Background catalog 只提供有界 引用、title 和 description，不等同于已加载正文。
+
+WorkingContext 维护 plan，只向模型呈现 milestones 与 todos，不持有 Workspace 快照。Milestone 是少量、可复用的事实寄存器：可以记录有价值的完成、尝试、失败、阻塞、测量值、决定、来源 引用、版本/digest 或局部成果，供后续 Cycle 防止遗忘；它不是 todo 的镜像、进度徽章或对模型的自我确认。失败或仅尝试过的工作必须明确记录其状态，不能登记为完成事实。Workspace 段只呈现 resource 引用/summary；Workspace 不保存 revision 或内容 CAS；Session 的 continuation 等有消费者的独立协议仍由各自 owner 解释。
+
+Context 更新从 SignalBus 捕获当前 Turn 的固定批次；解析、候选校验、背景读取和注册段的 prepare 全部结束后才安装。准备入口和批次消费均为 async；短背景读取使用 joined owner 操作，取消时等待读取结束且不安装候选。默认背景的 catalog、provider 索引和正文也先完整准备，再一起安装，不在加载失败前暴露部分新目录。恢复信号以独立固定批次由内核提交，不从 Trap handler 直接修改视图。Home 顶层变更和活动 Memory 写入先提交 owner，再通知本轮段刷新；刷新只替换本轮目录与已加载内容，不自动内联新资源。
+
+模型 Control Tool 的请求与已安装操作分别披露：Context 在固定批次成功 install 后，以原始 scope 和调用身份发布 todo、milestone、Background 加载/逐出的 `context.control.applied` 观察。准备失败或拒绝的操作不发布成功事件；消费返回值仍只承载局部失败，Phase 完成观察提供控制反馈。初始背景快照、自动回收和 owner 刷新表达现态变化，不冒充 Agent 的控制动作。观察属于旁路，不建立平行的持久活动日志，Working 现态仍由已安装的 plan 段提供。
+
+## 注册段
+
+SegmentRegistry 在装配时校验段 id、更新路由唯一性与 ref 前缀不重叠。描述统一声明 owner、slot、order、shape、能力与可选 ref 路由；provider 每 Turn 创建实例。只读段不注册空的更新通道，声明 ref 路由的段必须提供真实 inspect 能力。已注册的更新信号在注册边界解码为 owner 的具体类型，再交给该段 prepare，异构调度不把内部候选退化为任意 JSON。identity、inputs、trace、plan、固定 journal、Home、Memory、Session 和 Workspace 都通过同一生命周期注册。Turn 内核必经 open，不要求外部装配重复添加 Context preparation handler；每个新 Turn 都创建新视图。统一 core.context.inspect 路由到声明 ref 的 Trace、Session 或只读归档 Workspace；选择能力提供当前可加载/已加载/受保护 ref，Heap 的加载/逐出和 owner 刷新使用相同 prepare/install。shape 按 State → Heap → Stack → Map 参与回收顺序，仅调用声明了 reclaim 的段，保留受保护默认内容。profile 贡献经 PluginRegistry 校验与激活；需要持久提交的 owner 使用 Turn 完成管线，不在纯段 prepare 中提交业务事实。
+
+prepare 不改变活动视图或持久事实；全部候选准备成功才同步 install。候选只属于准备它的 Turn 且只能安装一次。安装缺陷使段集合停止接受后续更新和渲染，不回滚业务副作用或重放已安装候选。渲染只读已安装视图；seal 返回以 segment id 标识的 JSON 快照，不解释领域 owner 内容。核心 inputs/plan/trace 通过类型化 ContextTurnCompletion 交付业务事实，持久段快照不再重复保存同一核心事实。
+
+部分 open 失败关闭已经交出的视图；尚未交出的资源由 provider 自行回收。Turn 在必要 finish 后逆序 close 段，连续取消仍等待清理完成。close 不关闭跨 Turn Engine，不再次提交 Session；失败成为独立有限诊断。
+
+## TurnTraceHeap
+
+Inputs 的初始文本、追加和回答在可见边界生成独立输入 Entry，映射为 user 消息；它们与 Inputs 保持同源，不另存输入事实。回答从 typed answer 和原问题补全选项标签、说明及 comment。ask 仍只有自己的 ActionResult Entry，可读文字准确表达已生成的问题、完整选项和说明，不制造第二个提问事件。ActionResult 的 model_text 只改变显示，payload 和状态继续由 Action owner 持有；普通结果是否折叠由自己的保留契约决定。
+
+引用格式由[引用设计](references.md)统一说明。Trace 的根、input/action/entry/node 共用正式 Turn 身份；hot Entry、压缩节点和目录同时给出真实语义线索与引用。Background catalog、已加载资源头和 Workspace Working 使用可读文本，保留具体说明与定位入口；内部机器快照继续供 SDK、owner 和持久化使用。
+
+### Owner navigation and reference identity
+
+`SegmentDescriptor.ref_prefixes` is a routing scope only. Each opened owner
+may expose `navigation_refs()` for roots that can be passed directly to
+`core.context.inspect`; the Context overview projects those owner roots as
+`segments[].root_refs`. The kernel does not construct Session, Trace, or Home
+identities. Trace additionally owns validation of head, compact node, entry,
+action, and input references before Resource resolve returns a locator.
+
+TurnTraceHeap 是当前 Turn 的 append-only 运行事实：
+
+- hot entries 直接进入 MessageStack；
+- 压力回收先折叠 foldable ActionResult 的完整 visible overlay；
+- 再按完整 Cycle 把较旧 hot entries 移入 immutable leaf；
+- leaf 按 branch factor 合并为多层 branch；
+- MessageStack 只保留 heap head 与剩余 hot entries。
+
+压缩不删除 canonical entry，也不把已展开内容复制为第二份热历史。heap topology、node id 和压缩布局只在当前 Context 生命周期内存在，不写入 Session。
+
+### 渐进检查
+
+模型通过 `core.context.inspect` 检查段声明的 ref。Stack、Map、State 表达不同内容语义；渐进披露是访问方式，不把它们强行改成同一种数据形状。Trace、Session 与资源文档读取共用 retrieval 的语义披露构件和既有 continuation 基础设施。owner 提供标题、引用、正文及机器事实；公共构件优先保留完整项，长项只切正文，标明实际字符或文档行范围。同一次页选择生成 SDK/Endpoint 页面、模型文字及可持久化的精简读取事实，不让模型拼接序列化框架 JSON。
+
+引用的 Markdown label、目录说明或命中摘录与 ref 一起计入预算。资源正文与直接引用均可续页；目录不会在 metadata 中无界复制。折叠记录保存本次所读目标、短线索、实际覆盖和后续状态，不承诺重读旧正文。通用机器数据接口仍可使用 JSON 传输分片，独立于 Inspect 的可读正文分页。
+
+回复的读取投影从原问题与类型化回答共同生成。当前 input occurrence、通过 input_id 关联的 Trace Entry、活动 Session 证据与已完成交互共用问题定位、选择标签或自由回答线索，以及关联提问、选择、选项说明和 comment 的分段。分页保留完整正文，后页在标题中说明问题和当前段落；包装计入页面预算，不计入正文覆盖，也不改变原有输入事实或 Trace 消息。
+
+Inspect 回忆按整体预算保留读取目标和意图、真实返回数量、部分覆盖与后续状态，具体条目的解释、ref 和范围一起保留或省略；不再要求保存完整子项列表。唯一正文项保留实际读取范围。目标与必要反馈构成不可截断的最低事实，仍放不下时由外层折叠；重新取得内容沿原资源入口读取现态，不推导新的父引用，也不恢复旧页面或旧续页链。
+
+Trace 的根同时提供冷节点与热记录线索，分支给出直接子节点，叶组给出稳定 entry ref，再沿 entry ref 读取语义详情。折叠和父节点合并不改变已返回引用。根、分支、关系和长叶子均分页；正文不会被静默裁掉。公开内容只表达决策、行动、结果、必要反馈和来源，不要求模型理解内部序号、存储版本或完整性校验。
+
+可选 query 只搜索给定 ref 下的原始语义内容，按 owner 事实顺序返回有界摘录与精确 ref。Trace 排除 inspect 自身的重复请求和返回；查询不展开整段、不隐式加载正文，也不调用 LLM。QUERY 是独立声明的能力；只读归档 Workspace 等未声明该能力的 owner 返回局部不支持结果。
+
+统一披露页以有序 items 交付详情、child 线索、关系或来源。continuation 绑定 owner、ref、query 和当前读取视图；视图变化使旧 token 明确失效，不静默混页。内部绑定信息只在 opaque token 中由基础设施解释。
+
+inspect 本次返回的完整页面必须先进入一次取得响应的主循环 Phase1/Phase2 LLM 请求，之后才允许压力回收其 overlay；解除保护本身不删除正文。compose 纯渲染、Action 内部的 LLM/JEV/Embedding 调用以及容量拒绝都不能解除保护；受保护结果所在区间也不能被折入冷节点。折叠后保留 origin ref，可由 inspect 重新读取 owner 当前保留的内容；context search 从固定原始事实/解释来源发现内容，不提前 seal 或 completion。continuation 只负责所属接口的续页，不触发模型调用或解除展示保护，也不额外保证容量折叠后仍能取得旧令牌。
+
+活动 Action fact 可读取当前 Trace 持有的实际结果，Entry 则读取条目保留的叙事内容。读取行动 A 的 Inspect B 产生独立结果；B 的展开正文可折叠为读取事实，不删改 A。Session completion 按各行动自身的保留契约提交结果，不能从活动 Turn 的读取能力推导未保存正文的跨 Turn 恢复能力。
+
+## Turn Completion
+
+Heap 段快照保留本轮实际安装的资源正文、身份与加载来源。运行中只读投影从已安装段取得同一内容，结束后沿必要 completion 保存到 Session；查看页面不会调用资源 owner 的加载操作。它是本轮结束事实的一部分，不是新的活动 Context，也不复制每次模型调用的消息栈。
+
+运行中需要引用事实的 owner 可读取 ContextTurnFacts：在事件循环取得当前已接受输入与按请求登记的 Action 快照，不 seal、不结算行动、不安装 Context 更新。Session 用它解释当前证据和完成后的同一来源身份；Kernel 不解析 Session 图或持久引用。seal_trace/end_turn 保留为收尾入口，不能代替运行中读取。
+
+`end_turn()` 产生 typed immutable `ContextTurnCompletion`，包含 Turn identity、有序输入文本与原始接收时间、plan 终态、Background refs、按 id 标识的段快照和 `SealedTurnTrace`。Sealed trace 保存 canonical entries、类型化 Action 执行事实和只存引用的时间线，不携带 heap topology。输入保留 Inbox 的受理顺序，时间线另记安装和合并可见位置；Action 请求、开始和结算按实际回调记录，不能从批次结果排序反推。环境/Job 交付、必要 phase note 与已安装 plan patch 通过现有 Signal 批次记录。
+
+该对象只在唯一 Loop completion pipeline 中传递。Session 在自身边界投影为持久业务记录：输入与行动正文各存一处，时间线引用它们，必要语义 note 单独保存；不从消息布局猜测 call/result 配对。时间线表达 owner 观察与提交顺序，不声称外部因果时间。Context 不生成持久 Summary、平行日志或崩溃续跑协议。
+
+## 失败边界
+
+环境事件只在 TurnInbox 固定批次消费时经插件适配为更新意图；Workspace 段 prepare 读取 owner 已提交的当前状态，不执行扫描或文件写入。一个批次中的输入、事件 Trace 摘要和段更新一起安装，成功后才确认 Inbox。事件回调和原生 watcher 不直接修改 Context，也不把资源正文自动展开到 Working。
+
+无效 ref/continuation 是可修正的 `context.inspect` 局部 Action failure。Context 配置、资源准备或内部不变量失败经 RuntimeContextBridge 改变当前 Turn 控制流。Context 自身预算不足使用 Context-owned 恢复原因，LLM 容量不足使用独立 LLM 原因；User/Reflection 装配将两者接入各自压力策略。恢复有进展才重放可重建的 Task，否则结束 Turn，不为不同模型生成不同 MessageStack。Context bridge 位于自身 runtime_bridge.py，捕获的 Context signal batch 在 Module 重试中保持同一批次，不重新取队列。
+
+## 插件装配
+
+Turn Context 先由内核根据 `ContextSettings` 构造核心段。Home、Memory、Session、Workspace、Job 与 AgentPlugin 以显式 `PluginProfileExtension` 提供服务、段和动作贡献；`PluginRegistry` 在安装前校验服务唯一性、依赖顺序以及段 id、ref 和 signal 路由。解析失败不会部分安装，激活只发生一次。实际注入的是 owner 定义的受约束 async Service，Action、背景 provider 与 Skill provider 使用同一实例；不在注册窄接口后闭包捕获完整 Engine。纯渲染只读已安装视图，文件读取和网络检索分别使用 joined 本地操作与原生 async。段 provider 仍只创建当前 Turn 的视图，Engine 服务跨 Turn 持有领域事实。

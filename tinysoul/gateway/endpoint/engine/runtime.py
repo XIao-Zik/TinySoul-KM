@@ -1,0 +1,277 @@
+"""Endpoint runtime status and command engine."""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from uuid import uuid4
+
+from tinysoul.agent.requests import UserTurnRequest
+from tinysoul.infra.json import JsonObject, to_json_object
+from tinysoul.infra.time import CalendarDay, CalendarDayError
+from tinysoul.kernel.interaction import QuestionAnswer
+from tinysoul.kernel.loop import LoopControlKind
+from tinysoul.kernel.loop.interaction.inbox import InboxReceipt
+from tinysoul.plugins.reflection import (
+    ReflectionRequest,
+    ReflectionScope,
+    ReflectionTrigger,
+)
+from tinysoul.runtime import RuntimeException, RuntimeGatewayError
+
+from ..errors import EndpointRequestError
+from .context import EndpointEngineContext
+
+
+class EndpointControlKind(StrEnum):
+    STOP_TURN = "stop_turn"
+    EXIT_PROGRAM = "exit_program"
+
+
+class EndpointRuntimeEngine:
+    """Translate runtime status and control requests to the App gateway."""
+
+    def __init__(self, context: EndpointEngineContext) -> None:
+        self._context = context
+
+    async def status(self) -> JsonObject:
+        if not self._context.available:
+            return {
+                "protocol_version": 2,
+                "instance_id": self._context.settings.instance_id,
+                "project_identity": self._context.settings.project_identity,
+                "ready": False,
+                "active_day": "",
+                "turn_active": False,
+                "runtime": {"state": "unavailable"},
+                "latest_event_sequence": self._context.events.latest_sequence,
+                "event_journal": self._context.events.journal_status(),
+            }
+        turn_scope = self._context.gateway.active_turn_scope
+        runtime = self._context.services.runtime_status()
+        active_day = runtime["active_day"]
+        return {
+            "protocol_version": 2,
+            "instance_id": self._context.settings.instance_id,
+            "project_identity": self._context.settings.project_identity,
+            "ready": True,
+            "active_day": active_day,
+            "turn_active": turn_scope is not None,
+            "runtime": runtime,
+            "latest_event_sequence": self._context.events.latest_sequence,
+            "event_journal": self._context.events.journal_status(),
+        }
+
+    async def restart(self) -> JsonObject:
+        """Request host controlled Agent generation replacement."""
+        try:
+            return await self._context.lifecycle.restart()
+        except RuntimeException as exc:
+            raise EndpointRequestError(
+                status_code=503,
+                code="agent.restart_failed",
+                message="Agent generation could not be restarted.",
+                details={"reason": exc.reason},
+            ) from exc
+
+    async def submit_user_input(
+        self,
+        text: str,
+        metadata: JsonObject,
+        *,
+        command_id: str = "",
+    ) -> JsonObject:
+        if not isinstance(text, str) or not text.strip():
+            raise EndpointRequestError(
+                status_code=422,
+                code="input.invalid",
+                message="Input text must be non-empty.",
+            )
+        try:
+            receipt = await self._context.gateway.submit_user_input(
+                text,
+                source="endpoint",
+                metadata=to_json_object(metadata),
+                command_id=command_id or None,
+            )
+        except RuntimeGatewayError as exc:
+            raise EndpointRequestError(
+                status_code=409,
+                code="input.rejected",
+                message=str(exc),
+            ) from exc
+        return receipt.to_json()
+
+    async def create_request(
+        self,
+        *,
+        kind: str,
+        text: str,
+        target_day: str,
+        instructions: str,
+        metadata: JsonObject,
+        command_id: str = "",
+    ) -> JsonObject:
+        identity = command_id or f"command_{uuid4().hex}"
+        request: UserTurnRequest | ReflectionRequest
+        if kind == "user":
+            if not text.strip():
+                raise EndpointRequestError(
+                    status_code=422,
+                    code="turn.text_required",
+                    message="User Turn requires text.",
+                )
+            if target_day or instructions:
+                raise EndpointRequestError(
+                    status_code=422,
+                    code="turn.fields_invalid",
+                    message="User Turn accepts text, not Reflection fields.",
+                )
+            request = UserTurnRequest(
+                text, source="endpoint", metadata=metadata, request_id=identity
+            )
+        else:
+            if kind not in {"home", "memory"} or text:
+                raise EndpointRequestError(
+                    status_code=422,
+                    code="turn.fields_invalid",
+                    message="Reflection Turn requires home/memory and instructions.",
+                )
+            request = ReflectionRequest(
+                scope=ReflectionScope(kind),
+                trigger=ReflectionTrigger.MANUAL,
+                target_day=_parse_target_day(kind, target_day),
+                instructions=instructions,
+                source="endpoint",
+                metadata=metadata,
+                request_id=identity,
+            )
+        handle = await self._context.gateway.commands.submit_turn(request)
+        return {
+            "accepted": True,
+            "command_id": identity,
+            "request_id": handle.request_id,
+            "turn_id": handle.turn_id,
+            "kind": kind,
+            "state": handle.state.value,
+        }
+
+    async def get_request(self, request_id: str) -> JsonObject:
+        snapshot = self._context.services.request_snapshot(request_id)
+        if snapshot is None:
+            raise EndpointRequestError(
+                status_code=404, code="turn.not_found", message="Turn was not found."
+            )
+        return snapshot.to_json()
+
+    async def list_requests(self) -> JsonObject:
+        return self._context.services.request_directory()
+
+    async def append_input(
+        self, request_id: str, text: str, input_id: str
+    ) -> JsonObject:
+        receipt = await self._context.gateway.commands.append_input(
+            request_id, text, input_id=input_id
+        )
+        return _receipt_json(receipt)
+
+    async def reply(
+        self, request_id: str, question_id: str, answer: QuestionAnswer
+    ) -> JsonObject:
+        receipt = await self._context.gateway.commands.reply(
+            request_id, question_id, answer
+        )
+        return _receipt_json(receipt)
+
+    async def grant(
+        self, request_id: str, budget_request_id: str, count: int
+    ) -> JsonObject:
+        accepted = await self._context.gateway.commands.grant_cycles(
+            request_id, budget_request_id, count
+        )
+        return {
+            "request_id": request_id,
+            "budget_request_id": budget_request_id,
+            "accepted": accepted,
+        }
+
+    async def cancel(self, request_id: str) -> JsonObject:
+        accepted = await self._context.gateway.commands.cancel_request(request_id)
+        return {"request_id": request_id, "accepted": accepted}
+
+    async def jobs(self, request_id: str) -> JsonObject:
+        jobs = self._context.services.turn_jobs(request_id)
+        if jobs is None:
+            raise EndpointRequestError(
+                status_code=404, code="turn.not_found", message="Turn was not found."
+            )
+        return {"request_id": request_id, "jobs": [item.to_json() for item in jobs]}
+
+    async def stop_job(self, request_id: str, job_id: str) -> JsonObject:
+        if self._context.services.turn_jobs(request_id) is None:
+            raise EndpointRequestError(
+                status_code=404, code="turn.not_found", message="Turn was not found."
+            )
+        snapshot = await self._context.services.stop_job(request_id, job_id)
+        return snapshot.to_json()
+
+    async def submit_control(
+        self,
+        kind: EndpointControlKind,
+        metadata: JsonObject,
+        *,
+        command_id: str = "",
+    ) -> JsonObject:
+        loop_kind = {
+            EndpointControlKind.STOP_TURN: LoopControlKind.STOP_TURN,
+            EndpointControlKind.EXIT_PROGRAM: LoopControlKind.EXIT_PROGRAM,
+        }[kind]
+        try:
+            receipt = await self._context.gateway.request_control(
+                loop_kind,
+                source="endpoint",
+                text=kind.value,
+                metadata={
+                    **to_json_object(metadata),
+                    **({"command_id": command_id} if command_id else {}),
+                },
+            )
+        except RuntimeGatewayError as exc:
+            raise EndpointRequestError(
+                status_code=409,
+                code="control.rejected",
+                message=str(exc),
+            ) from exc
+        return receipt.to_json()
+
+
+def _parse_target_day(kind: str, target_day: str) -> CalendarDay | None:
+    if kind == "home" and target_day:
+        raise EndpointRequestError(
+            status_code=422,
+            code="turn.target_day_invalid",
+            message="Home Turn does not accept target_day.",
+        )
+    if kind == "memory" and not target_day:
+        raise EndpointRequestError(
+            status_code=422,
+            code="turn.target_day_required",
+            message="Memory Turn requires target_day.",
+        )
+    if not target_day:
+        return None
+    try:
+        return CalendarDay.parse(target_day)
+    except CalendarDayError as exc:
+        raise EndpointRequestError(
+            status_code=422,
+            code="turn.target_day_invalid",
+            message="target_day must use YYYY-MM-DD.",
+        ) from exc
+
+
+def _receipt_json(receipt: InboxReceipt) -> JsonObject:
+    return {
+        "sequence": receipt.sequence,
+        "record_id": receipt.record_id,
+        "accepted": receipt.accepted,
+    }

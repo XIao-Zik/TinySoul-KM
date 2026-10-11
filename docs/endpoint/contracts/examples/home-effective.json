@@ -1,0 +1,29 @@
+{
+  "ref": "home:top/agent/contract",
+  "kind": "content",
+  "view": "content",
+  "items": [
+    {
+      "text": "Workspace guidance\n",
+      "narrative": "Workspace guidance\n",
+      "ref": "home:top/agent/contract",
+      "title": "contract.md",
+      "coverage": {
+        "start": 0,
+        "end": 19,
+        "total": 19,
+        "complete": true,
+        "start_line": 1,
+        "end_line": 1
+      }
+    }
+  ],
+  "metadata": {
+    "locator": {
+      "ref": "home:top/agent/contract",
+      "view": "effective"
+    },
+    "title": "contract.md"
+  },
+  "title": "contract.md"
+}

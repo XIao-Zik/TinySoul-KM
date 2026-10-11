@@ -1,0 +1,17 @@
+[memory]
+root = "memory"
+max_active_chars = 12000
+
+[memory.documents]
+daily_max_chars = 32000
+entity_max_chars = 16000
+concept_max_chars = 16000
+fact_max_chars = 4000
+note_max_chars = 24000
+redirect_max_hops = 8
+
+[memory.inspect]
+page_max_chars = 8000
+
+[memory.search]
+embedding_cache_max_chars = 16000000

@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "ResourceLocatorResponse": {
+      "additionalProperties": true,
+      "properties": {
+        "ref": {
+          "title": "Ref",
+          "type": "string"
+        },
+        "day": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Day"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "view": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "View"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "title": "ResourceLocatorResponse",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "properties": {
+    "kind": {
+      "title": "Kind",
+      "type": "string"
+    },
+    "locator": {
+      "$ref": "#/$defs/ResourceLocatorResponse"
+    },
+    "capabilities": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "resolved_from": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Resolved From"
+    }
+  },
+  "required": [
+    "kind",
+    "locator"
+  ],
+  "title": "ResourceResolveResponse",
+  "type": "object"
+}

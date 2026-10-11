@@ -1,0 +1,316 @@
+# Agent 重构 R2 收口子计划：生命周期、统一等待与服务边界
+
+状态：`done`（2026-09-17 完成 R2 收口；C1–C3 已落实，C4 domain 归并保留后续评估；实现、文档与完整门禁已逐项核对）。
+日期：2026-09-16。
+主执行计划：[Agent 架构重构](20260915-done-agent-architecture-refactor-plan.md)。
+前置记录：[R2 异步内核与 SDK 运行闭环](20260915-done-Agent重构第二轮子计划-异步内核与SDK运行闭环.md)。
+分析基线：本地 `8c0bd6c`，开始分析时工作区干净；未查询远端。
+实施基线：本地 `ed51b5c`，2026-09-17 开始时工作区干净；不修改或重置用户运行数据。
+设计依据：仓库 `AGENTS.md`、主计划第 4–6、8–9、12–14 节，以及 `docs/chat/00 doing something.md` 的长期个人 Agent 目标。
+
+## 1. 收口结论与范围
+
+R2 已建立可复用的异步内核、三类 profile、段协议、SDK、CLI 和显式插件装配，依赖迁移成果已保留。复审时发现的缺口集中在跨模块边界：生命周期协调存在同步阻塞；Action 内部等待与 Loop 等待并存；服务表暴露完整 owner；取消与完成存在两套终态解释。本轮已按所有权重整这些协作边界并完成 R2 验收。
+
+本计划承接 R2 剩余工作并已完成。原 R2 文档保留历史实施与门禁记录，其第 24 节的整体完成结论已由本次复审更正。主计划 S1、S2 均恢复为 `done`；S3–S7 保留后续范围。
+
+| 范围 | 本轮处理 | 保留后续阶段 |
+|---|---|---|
+| Agent/SDK 生命周期 | start/shutdown/restart/reload 的竞争、世代与日作用域、结果保留 | 不增加进程崩溃续跑或通用恢复平台 |
+| Kernel 等待 | INPUT/EVENT/TIMER/BUDGET 同一等待流程，通用 Job 监督动作 | S4 的真实 fswatch、调度策略深化 |
+| Plugin/领域服务 | 按用途限制权限的 async 门面、执行情景的 domain/action 策略，真实消费者迁移 | S3 的 Session organize、Workspace 去 CAS、完整 execution 领域合并；Reflection 动作归并评估 |
+| Gateway | 现有 CLI/Endpoint 改用统一 SDK 和服务边界，同步已有协议文档 | S5 的完整 Endpoint v2 与新增远程控制路由 |
+| 资源与完成 | Action/Job 收敛、Session 必要提交、Reflection 取消事实 | S6 的 ACP/MCP adapter、跨 Turn 连接策略实装 |
+
+不重建第二套 Loop、Action、Job、Context 或存储。保留 owner 算法和事实来源，删除被本轮新契约替代的入口、等待器和宽权限注册；不为旧测试留下兼容别名。
+
+## 2. 缺口与证据
+
+以下六项均已完成。前次复审的局部或真实 SDK 路径已转为 owner 契约测试；诊断中的时间数值不作为稳定断言。
+
+| 编号 | 复审时实现与可观察问题 | 对应契约 | 收口位置 |
+|---|---|---|---|
+| F1 / P1 | `runtime/generation/handle.py` 的 Condition 等待被根调度协程直接调用；候选构建失败正在异步清理时，新根可阻塞整个事件循环，使清理不能完成 | 世代切换不能阻塞事件循环；候选失败保留当前世代 | R2C.1：`RuntimeHandle` async lease、候选失败清理与竞争测试 |
+| F2 / P2 | `execution.wait` 在 Phase3 内等待并监听旧 Signal；SDK 已接受的 Inbox 追加输入不能及时唤醒它。`wait_before_cycle` 仍由进程 manager 控制节拍，通用 EVENT/TIMER 没有完整生产调用路径 | Action 先收敛，Loop 在 Cycle 边界统一等待 | R2C.4：`WaitCondition`/`wait_for_cycle`、`core.wait` 与 Job actions |
+| F3 / P2 | `agent.services` 返回 User profile 中的完整 Memory/Home/Workspace 等 Engine；长期写权限、async I/O 和世代有效性未由公共门面约束。已取得的 Workspace Engine 可在 shutdown 后继续写入 | User 无持久 Memory/actual Home 写入口；调用全过程服从 Agent 生命周期 | R2C.3：按用途 `Service` facade、世代/日期失效和 JoinedOperations |
+| F4 / P2 | `sdk.start()` 与 `shutdown()` 对 `_shutdown_task` 的更新不在同一生命周期协议内；受控并发可使 shutdown 访问被清空的任务引用并抛出 AttributeError | 生命周期操作可并发调用，但状态转移与资源关闭只有一个 owner | R2C.1：start/shutdown/restart 任务归属、受理关闭与 join |
+| F5 / P2 | 必要完成处理期间取消，Turn 可保留已经完成的 owner outcome，而 Scheduler 将 Handle 标为 CANCELLED；已提交 Session 与 SDK 终态矛盾。Reflection 取消映射也需保留自身任务身份 | 取消请求不等于取消结果；owner 完成事实权威 | R2C.2：`FINALIZING`、typed completion 与 Reflection outcome 映射 |
+| F6 / P2 | queued 取消的提前返回绕过统一保留清理；retained_outcomes=2 时连续六次取消仍保留六个完成句柄 | 每条受理路径收敛一次，根队列与终态索引均有界 | R2C.2：统一 `_finish_handle`、按完成顺序淘汰和 queued 取消测试 |
+
+现有基线门禁为 Full `1065 passed, 2 skipped, 23 deselected`，typecheck 通过；这说明已有测试未覆盖上述边界，不构成本轮修复证据。真实 provider/network 验证未执行。
+
+与原 R2 的对应关系：R2.1 的 async LLM/短 owner 适配、R2.3 的段协议保留并做回归；R2.2 的完成/取消由 R2C.2 收口；R2.4 的插件服务权限由 R2C.3 收口；R2.5 的等待由 R2C.4 收口；R2.6 的 SDK 生命周期由 R2C.1–R2C.3 收口。R2.7 已迁移的 CLI/Endpoint/打包随新边界再次核对；R2.8 整体验收由 R2C.6 重新执行。
+
+## 3. 所有权与协作结构
+
+| Owner | 唯一职责 | 下游只获得 |
+|---|---|---|
+| Agent 生命周期与 RootScheduler | 操作受理、根排队、世代切换、日协调、最终发布与有限保留 | 生命周期快照、请求回执和 TurnHandle |
+| Runtime 世代原语 | 不含领域语义的 async lease、活动状态与排他切换 | 不阻塞事件循环的作用域；无 Memory/Workspace 知识 |
+| Loop / TurnInbox | 运行位置、待满足条件、预算与下一 Cycle；Inbox 保留已接受输入 | 类型化等待快照；等待者不消费正文 |
+| Kernel JobRegistry | Turn-owned Job 身份、状态、停止请求和终态监督 | 有界 Job snapshot、就绪条件和终态事实 |
+| 领域 Engine / Service | 持久事实、局部一致性、按用途限定的公共操作 | async Service、不可变 snapshot、Link；不泄漏完整 Engine |
+| Profile / Plugin | 显式贡献服务、段、动作并校验依赖 | 真实使用的受约束服务；不向段注入整个 Agent |
+| Gateway | 外部协议到 SDK 的映射与错误呈现 | 同一 SDK/Service；不持底层世代锁，不直接组装 owner |
+
+Engine 仍是模块组装门面和事实 owner；Service 是它对特定消费者开放的操作集合，Segment 是 Turn 内的加载视图。三者不复制同一业务状态。服务权限表达代码协作边界，不建设 Python 宿主的安全沙箱。
+
+## 4. 生命周期与世代协调
+
+### 4.1 一套生命周期操作协议
+
+在 `agent/sdk.py`、`assembly.py`、`config.py` 与现有世代原语上收敛操作所有权。生命周期锁只保护短状态转移；已受理操作由明确 task 持有，调用者使用稳定的局部引用等待，不能在 await 后重新读取可能被其他操作替换的 task 字段。
+
+| 竞争场景 | 建议契约 |
+|---|---|
+| 重复 start | 共享同一次启动；不得重复激活来源和 Engine |
+| start 期间 shutdown | 立即关闭新业务受理，在安全边界停止启动并等待已创建资源收敛；结束于 stopped |
+| 重复 shutdown | 共享同一次关闭；等待者取消不抛弃关闭任务 |
+| restart 与其他生命周期操作 | restart 拥有完整关闭→重建过程；中间不开放新业务受理 |
+| 活动/等待 Turn 或日操作期间 reload | 明确返回 busy；不在 Turn 中途换世代 |
+| reload 已获激活权后到达新根 | 可按队列容量受理，异步等候激活结束；失败后由原世代继续分派 |
+| 根请求已等待分派时发起 reload | 返回 busy，避免配置操作越过已受理 work |
+| reload 期间 shutdown | 关闭受理，取消或等候候选构建的安全边界；候选/退休资源 join 后再关闭最终活动世代 |
+
+旧 worker 的完成回调必须核对任务与世代身份，不能把新实例置为 stopped。已缓存的 Commands/Service 也检查同一受理状态，不能绕过 SDK 表层状态检查。配置 patch 仍只是保存候选；已开始的原子保存需完成后退出，不因关闭伪称撤销。
+
+### 4.2 async lease 与日边界
+
+替换 `RuntimeHandle` 面向异步消费者的同步 Condition 等待。获取、校验、使用和释放属于同一 async 作用域；等待活动世代或读者结束必须让出事件循环。状态查询返回已有内存快照，不通过读锁做隐式 I/O。
+
+RootScheduler、配置激活、SDK 服务和 Endpoint 一起迁移。不能只把锁的 acquire 放到线程里，留下取消后继续等待的线程或在不同线程 release 的行为。所有需要等待的入口必须有真实取消/关闭消费者，不保留同步与异步两套对外世代协议。
+
+日切由现有 AgentDayCoordinator 统一准入，Archive/Session/Workspace/Memory 仍各自解释目录与初始化事实。Turn 从准备到必要 finish、close 完成一直固定世代与 CalendarDay；日级 Service 操作也持有对应作用域。跨午夜不会让旧 Link 指向新日同名资源。
+
+Archive 的线程锁若仍用于短文件操作，应在同一次 JoinedOperations 调用内获取和释放；跨 await 的日占用由 Agent 的 async 协调表达。日操作与世代操作采用固定顺序：世代准入→日准入→owner 短操作，禁止反向申请或持线程锁等待协程。
+
+候选失败关闭候选并恢复原世代服务；切换提交后退休失败只报告 cleanup diagnostics，不回滚已公开的新世代。shutdown 必须 join 已受理的短 owner 操作和生命周期任务后才完成。
+
+## 5. 完成、取消与有界保留
+
+### 5.1 owner outcome 是终态依据
+
+继续使用 TurnOutcome、ReflectionOutcome 与 TurnHandle，不新增第二份执行结果。Handle 活动状态遵循 queued/preparing/running/waiting/finalizing/finished，取消、失败与完成含义由结果表达；SDK 若提供简化终态摘要，只能从权威结果投影，不由 catch CancelledError 独立决定。尚未开始执行的请求以明确的请求级取消或准备失败表达，不为填充结果而构造虚假 TurnOutcome。
+
+取消回执只表示停止请求已受理。取消发生于正常执行时，先收敛 Action/Job、保留已发生事实，再形成取消 outcome；完成候选通过输入/活 Job 检查并进入 seal/必要 finish 后，不再因迟到取消改写已固定的完成意图。该阶段对外呈现 finalizing，仍可等待关闭，但不承诺将结果变为 cancelled。必要提交失败仍是失败，后续资源 close 失败仍只是诊断。
+
+沿用主计划收尾顺序：关闭普通受理→Action/Job 收敛→消费已接受关键终态→seal→typed completion→必要 finish（Session 最后）→全部 close→释放日/世代作用域→发布 Handle 和 Observation。正常完成候选若遇到已接受新输入，应按既有契约撤回候选并继续，不能为抢先 seal 而丢输入。
+
+Reflection 将取消纳入自己的结果映射，保留 profile/task kind、target_day、已提交事实和底层 TurnOutcome；不得在取消时向 SDK 返回裸 User 风格 TurnOutcome。取消不撤销此前已提交的 Home/Memory 修改，也不生成 User Session。
+
+### 5.2 单一请求收敛出口
+
+RootScheduler 的正常、失败、queued 取消、preparing 取消、shutdown 清队路径共用收敛出口：完成一次、关闭 Inbox、解除路由/回调引用、记入终态保留并执行淘汰。
+
+queued 取消立即形成请求级取消结果，不创建虚构 Turn/Session。应从唯一待执行队列移除或在同一有界队列中回收其占位，不能堆积无界取消墓碑。终态索引按完成次序保留；外部已持有的 Handle 在内部淘汰后仍能读取原结果。request identity 去重的保证范围明确限定为活动请求和保留窗口，不暗示永久 exactly-once。
+
+## 6. 按用途收窄的 SDK 与插件服务
+
+### 6.1 权限与注入
+
+替换 `Service(MemoryEngine, ...)` 等完整 owner 注册。由对应 owner 暴露实际受约束的门面实例；不能只把完整 Engine cast 成更窄 Protocol，却仍把完整对象交给调用者。按真实消费者决定门面粒度，不机械生成每个 profile × 每个 owner 的空壳类。
+
+| 消费者 | 本轮应可获得 | 不应获得 |
+|---|---|---|
+| User profile | Home 查询与 overlay 操作、活动 Memory 操作与持久 Memory 检索、Workspace 操作、Session 只读投影 | actual Home 提交、持久 Memory 写、日切和任意路径管理 |
+| Home Reflection | 通用能力与 Home 审阅提交服务 | Memory 专属持久写；整个 Agent/其他 profile 服务表 |
+| Memory Reflection | 通用能力与目标 Memory 维护服务 | actual Home 提交；整个 Agent/其他 profile 服务表 |
+| SDK 宿主 / Endpoint（C1 已确认） | 现有真实需求的查询、Workspace 操作、类型化 User 请求及用户单次明确授权的 Reflection 请求 | 从 User 服务表旁路取得长期写入口；将单次授权扩展为持续整理权限 |
+
+Plugin 的 requires/resolve 使用同一门面契约；Action、Segment 和跨插件消费者使用实际注入对象，移除“注册了窄服务但闭包仍捕获宽 Engine”的旁路。组合根与 owner 内部可持完整 Engine，权限收窄不改变事实 owner。
+
+### 6.2 I/O、有效期与失败
+
+`agent.services.get(FacadeType)` 保持无 I/O 的类型查找；公共 I/O 方法改为 async。领域短文件操作经已有 JoinedOperations 完整 join，模型/网络保持原生 async。调用边界负责世代/日准入和生命周期检查，领域门面负责 owner 参数、Link 与局部失败；不在每个方法复制一套锁和清理代码。
+
+C2 已确认：门面绑定取得时的世代；日级服务还绑定 CalendarDay。对象闲置不占 lease，实际调用时获取并复验；成功 reload 换代、restart 关闭旧世代、相关日切或 shutdown 后，旧对象返回明确失效/关闭错误，由调用者重新获取，不能自动重绑到新资源。reload 候选失败且原世代仍有效时，原服务继续有效。只读结果快照可继续查看，但不能据此操作已失效的 owner。
+
+日级调用的目标是明确的 active day。空闲后首次新日工作仍由 Agent 完成确定性日准备；若准备导致原对象日期失效，本次操作在副作用前拒绝，调用者重新取得服务。活动 Turn 期间则继续使用该 Turn 固定日。SDK 文档必须说明重新获取的边界，不让宿主自行协调底层锁或默默重试写操作。
+
+已有 Endpoint 的配置、运行状态、Reflection 和 Workspace 调用同步迁移到这些公共入口。移除 `EndpointEngineContext` 的 raw generation/Engine 访问及不再有真实消费者的替代装配分支；HTTP 只做请求校验、await 和有限错误映射。Workspace 外部修改仍经 owner 提交，再通过既有事件路径使活动 Turn 在下一边界刷新。
+
+### 6.3 Reflection 的触发、单次授权与能力装配（C1 已确认）
+
+Reflection 是同一个 Agent 在特定执行情景中使用的插件能力。进入 Home 或 Memory Reflection 时，插件提供本次整理目标、相关语境、任务提示和对应专属能力，保留该 profile 的通用行动能力，复用同一 Turn/Cycle/Phase 内核。普通 User Turn 不挂载 Reflection 专属提示、整理动作或持久写服务；活动 Memory、Home overlay 等正常能力保持既有边界。
+
+自动路径由日切/每日调度策略触发。确定性日切与模型整理分开：Reflection 运行前先完成日切，使相应资料可用；模型整理的成功与否不阻塞确定性日切。Home、Memory 仍使用各自独立的 profile 和请求，按日期/profile 去重，不因日切与定时来源同时触发而重复安排同一项工作。
+
+手动路径是用户明确允许本次整理，随后安排一次独立 Reflection Turn。请求明确选择 Home 或 Memory profile、目标日（适用时）和本次整理要求；该授权仅适用于这次请求，不开启持续许可，不授权 Agent 在以后自行选择新的整理时机，也不自动扩大到其他整理目标。
+
+显式用户指令由输入适配层/SDK 经类型化 Reflection 请求进入 Agent 根队列。请求中的整理要求由 Reflection 的准备流程注入自身任务提示，不通过任意 metadata 改写权限，不把整份 User Context 共享给 Reflection。不向正常对话增加模型可自行调用的 Reflection 请求动作，也不从普通聊天内容推断长期授权；单次手动受理复用现有请求身份与去重，不建设另一套授权状态库。
+
+当前 User Turn 若仍活动或等待，Reflection 继续排队；当前 Turn 收尾并释放根执行位置后，调度器才运行该独立 work。请求已受理只表示已安排，不表示记忆或知识已经整理完成。Reflection 按自己的 outcome 报告结果，不写入 User Session，不作为需要当前 User Turn 等待的内部子 Turn 或 Turn-owned Job。
+
+用户单次授权约束的是进入本次 Reflection。进入后，Agent 在该次目标和 owner 权限范围内自主检查、整理、提交；Home review 是 Agent 使用的业务动作，不引入逐次写入的人工审批。SDK 宿主不另获绕过 Reflection 的 actual Home 或持久 Memory 管理写入口。
+
+### 6.4 执行情景、Profile 与 action 级策略
+
+“执行情景”表示同一个 Agent 正在进行何种 work，由现有 TurnProfile 承载。User、Home Reflection、Memory Reflection 是三个真实情景，分别决定目标/提示、Context 视图、可用能力与服务、准备流程和完成解释；它们共享 Agent 身份、持久事实 owner 和运行内核。情景在请求准入和 Turn 准备时确定，本轮不在活动 Turn 中途切换 profile，也不另建与 TurnProfile 平行的 Scenario 状态机。
+
+domain 表示模型规划时的能力分组，action 表示具体操作，profile 表示本次执行情景。情景可以选择额外的 domain，也可以选择同一 domain 中的部分 action；domain 名称不承担长期写权限。Service 仍约束实际可调用的 owner 操作，提示词、工具可见性和服务权限必须共同解释同一个有效能力范围。
+
+实施前的代码接入点如下，统一策略已在 R2C.3 落实：
+
+- `kernel/loop/assembly.py::TurnProfile` 已绑定 Context、ActionEngine、ServiceRegistry、提示及准备/完成管线，可以直接承载情景，无需新建执行器。
+- `ActionCatalog.with_actions`、`ActionEngine.view`、`ActionEngineBuilder.include_actions` 已支持 action 粒度的目录裁剪；Phase1/Phase2 从当前目录构造域和工具作用域。
+- Action catalog 已按 domain 默认值与 action 局部配置解析 `runtime.enabled`。当时 Reflection 通过 `plugins/reflection/actions.py` 拼接专属域，并以 `mark_actions_unsupported("core.memory.memorize")` 表达部分 profile 限制；情景策略与 backend 不可用的语义需要分开。
+
+R2C.3 已将情景能力装配收敛到已有 Action/profile 边界，采用以下规则：
+
+1. 插件显式声明并提供能力，profile 确定被授予的操作范围及对应 Service；配置不能把 User 提升为 Reflection，也不能凭 action 名称取得未授予的长期写服务。
+2. 情景设置支持 domain 默认选择和 action 级明确选择/覆盖，沿用 catalog 的域默认、动作覆盖语义。覆盖只在该 profile 已获准、已注册的能力范围内有效；规则在装配时转换为明确类型并解析一次，未知身份和契约冲突在入口报告。具体配置键随现有 settings/loader 实施，不增加动态表达式或任意情景发现平台。
+3. 有效 action 集合同时受情景授权、配置选择和实际 backend 支持约束。User、Home Reflection、Memory Reflection 都通过同一解析规则得到各自独立视图，不修改共享 catalog 来开启某个情景的动作，也不为每个 profile 复制动作定义。
+4. Phase1 只列出仍有可用 action 的 domain，Phase2 只展示已选域内当前可用的 action；参数归一化、批次准备和实际执行使用同一有效范围。直接提交范围外的 ActionCall 或批次也须在副作用前拒绝，不能仅隐藏模型工具而保留可绕过的执行入口。
+5. Reflection 保留已配置的通用动作，再获得自己的整理能力；只排除与该情景明确不相容的操作。profile 不允许的操作由情景策略解释，`unsupported` 只表达执行器/依赖不可用。策略与 R2C.3 的受约束服务一起落实，并由三个现有情景消费。
+
+| 执行情景 | 已配置通用动作 | Home 审阅提交 | 持久 Memory 整理写入 |
+|---|---|---|---|
+| User | 保留适用动作 | 不开放 | 不开放 |
+| Home Reflection | 保留适用动作 | 开放 | 不开放 |
+| Memory Reflection | 保留适用动作 | 不开放 | 开放 |
+
+上述权限矩阵不依赖专属动作是否位于独立 domain。因此未来可以把 Home 审阅动作放回 home，把 Memory 整理动作放入统一规划后的 Memory 能力分组，同时只在对应 Reflection 情景开放；独立 profile、准备语境和完成语义继续保留。
+
+本轮纳入 action 级情景策略，不把 domain/动作身份归并列为 R2 必需项。目前普通 Memory 动作实际属于 `core`（`core.memory.*`），尚无独立的通用 memory domain；catalog 又要求动作名采用 domain 前缀。因此归并不仅是改可见性，还涉及 Memory 的规划域归属、动作身份、catalog、配置、Skill 挂载、文档和测试的整体迁移。将该项列为 S3 领域语义整理的评估项；本轮保留现有动作身份和专属 domain，不把未来名称写成已发布接口。
+
+后续归并条件：情景策略与 Service 权限已统一；同一动作只保留一个定义与执行器；明确 Memory 规划域；相关消费者和生成资源一次迁移；不保留新旧动作 alias。归并不需要修改 Loop 或新建运行状态机，也不以 User 获得长期写能力为代价。
+
+## 7. 统一等待与 Job 监督
+
+### 7.1 从 Action 意图到 Cycle 边界
+
+在现有 `loop/completion.py` 与 Phase3/Cycle outcome 协作中统一完成、提问和等待意图的解释。模型输出先经 Action schema 与结果校验，再转换为 frozen typed intent；Loop 内部不反复从任意 JSON 猜语义。依赖保持 Action/Context/Loop 的现有方向，不能让低层 Action import Loop 来传递意图。
+
+`core.ask`、完成动作与等待动作的互斥在批次执行前校验，冲突形成可反馈局部失败，不先执行部分副作用再发现冲突。成功 ask/wait 的 ActionResult 只表明意图已受理，Phase3 随即结束；实际暂停、超时与恢复由 TurnRunner 在 Cycle 边界处理。
+
+本轮提供通用 `core.wait`（EVENT/TIMER）以及 `core.job.status`、`core.job.stop`、`core.job.wait`。Job wait 只是面向特定 Job 的就绪条件构造，不再拥有另一个等待循环。保留现有进程启动、输入、候选读取/应用等 owner 行为；删除与通用能力重复的 `execution.wait`/`execution.stop` 入口，同步 catalog、prompt、配置校验与生成资源，不留 alias。完整 execution 动作合并仍属 S3。
+
+### 7.2 一个等待上下文
+
+Loop 保存 next_cycle_index、待满足的普通条件及预算暂停信息。所有等待经同一处理流程，Handle 从该状态投影 reason/question/budget；不能先在 budget wait 返回后再进入一个没有处理已到事件的独立 Job wait。
+
+| 条件 | 唤醒与消费语义 |
+|---|---|
+| INPUT | 匹配 question_id 的 reply 满足；普通追加按主计划作为新指示恢复，并明确记录原问题未答，不伪造 reply |
+| EVENT | after_seq 后符合显式过滤条件的事件，或目标 Job 已处于终态；普通追加可中断等待 |
+| TIMER | monotonic deadline 到达；普通输入/cancel 可中断；普通进度不提前唤醒，除非显式组合事件条件 |
+| BUDGET | grant/cancel；环境事件、普通文本和 Job 完成都不能增加预算 |
+
+普通条件满足但预算不足时保留就绪事实，等待 grant；先收到 grant 而普通条件未满足时继续等待。计时器不因预算暂停重新计时。无默认 ask 超时，显式超时按 awaiting_user 收尾；被新指示取代、已超时或已结束的 question 迟到回复明确拒绝，不复活旧问题。
+
+EVENT 的过滤条件只使用真实 EnvironmentEvent/Job 协议中的类型、身份与必要路由信息，不引入任意 JSON 谓词平台。以本轮 SDK publish 和进程 Job 为真实消费者验证事件过滤；不为尚未实现的 fswatch/ACP 预建字段。
+
+登记条件前检查权威状态和未消费记录，登记游标后原子复查；游标对应当前 Cycle 已消费边界，不能取登记时最新序号而漏掉间隙事件。等待者只观察，不从 Inbox 删除正文。条件已满足却在边界 ack 后才开始等待时，Loop 保留有限就绪凭据（身份/序号/原因），不复制第二份事件正文。
+
+拒绝无意义的零时长定时空转；没有事件、输入或 deadline 就不轮询模型。恢复原因进入同一 Trace 事实，不补造新的 ToolResult。预算检查仍通过 Loop bridge/Trap 的受限 SUSPEND，普通等待不转换为 Runtime 异常。
+
+### 7.3 进程能力回到执行 backend
+
+删除 SupervisedProcessManager 的 `wait_before_cycle`、下一 Cycle 节拍和旧 SignalWatch 唤醒路径，以及随之无消费者的等待配置。启动 Action 返回 Job 身份，模型通过通用 Job 操作观察、停止或等待；backend 只负责进程、输出、候选资源和回收。
+
+JobRegistry 维护唯一监督事实，backend 发布状态变化；终态单调且只提交一次，stop/collect 的重复调用语义明确。Turn 等待期间 Job 继续推进，但 Job 不补 Cycle、不开新根 Turn、不跨 Turn。进程硬停止与释放继续复用既有受控进程实现。
+
+## 8. 异常与控制流核对
+
+| 场景 | 归属与对外形式 |
+|---|---|
+| 模型给出冲突意图、非法等待参数、未知 Job | Action/Phase 局部结果，有限原因与摘要，后续 Cycle 可修正 |
+| SDK busy、服务已失效、请求已关闭或参数不合法 | Agent/服务公共边界的类型化失败；Gateway 映射为稳定响应，不伪造 Turn 结果 |
+| owner 文件/配置/内部契约失败 | owner 私有失败；进入运行流程时由 owner runtime_bridge 映射，保留 module/kind 摘要 |
+| 预算暂停、全局取消/结束 | 合法 frame 上的 Runtime 控制流；不使用 Observation 驱动 |
+| 已收敛执行的取消或结果未知 | 保存真实执行事实；不能统一改写为普通工具失败 |
+| 必要 finish 失败 / close 失败 | 分别影响主 outcome / 仅添加有限 cleanup diagnostics |
+
+SDK 服务直接调用不应要求宿主伪造 RunScope 来触发 Trap；由服务边界解释自己的失败。运行中的同一 owner 失败仍沿既有 bridge 进入 Runtime，避免原始解析器/供应商异常泄漏。保持稳定 StrEnum、frozen dataclass 和动态入口校验；不以裸内置异常、宽泛 Any 或全面 except Exception 掩盖契约问题。
+
+## 9. 实施切片与删除清单
+
+以下顺序是依赖顺序，不要求每个中间提交都可独立发布。每片完成后记录实现位置、文档与验证，不仅勾选代码改完。
+
+| 切片 / 状态 | 工作与主要落点 | 完成证据 |
+|---|---|---|
+| R2C.1 `done` | `agent/{sdk,assembly,config,builder,day,scheduler}.py` 与 `runtime/generation/`：统一生命周期、async 世代/日作用域；迁移现有锁消费者 | F1/F4 竞争复现转绿；事件循环保持响应；重复关闭、候选失败和资源 join |
+| R2C.2 `done` | `agent/{handles,scheduler}.py`、`kernel/loop/`、`plugins/reflection/`：终态映射、finalizing、单一请求收敛与有界保留 | F5/F6 转绿；SDK/Session/Reflection 结果一致；queued 取消无 Session |
+| R2C.3 `done` | `agent/services.py`、Plugin registry、领域服务、Action/profile 装配与配置、Reflection 请求/准备流程及现有输入适配：受约束 async 门面与有效期、domain/action 两级情景策略、单次授权的独立 Reflection | F3 转绿；三情景的可见/可执行/服务权限一致；同域 action 可分别控制；普通 User 无 Reflection 专属能力；单次授权只安排本次整理；旧服务不误写 |
+| R2C.4 `done` | `kernel/loop/{completion,phases,cycle,turn,inbox}.py`、`kernel/jobs/`、core catalog、进程能力：统一等待与通用 Job 操作 | F2 转绿；SDK submit→wait→append/reply/grant/cancel→finish；事件登记竞争 |
+| R2C.5 `done` | CLI、Endpoint、生成模板、包外 SDK、设计/协议文档：整合迁移和清除旧契约 | 无旧等待器/宽权限 Service/同步锁入口；现有 HTTP 与 CLI 行为可解释 |
+| R2C.6 `done` | 全轮验收与 AGENTS/主计划核对 | Full/typecheck/导入边界/生成与 wheel 验收；逐条关闭本表和 F1–F6 |
+
+R2C.3 按已确认的 C1/C2 和 C3 情景策略方向实施，依赖 R2C.1 的生命周期边界；C4 domain 归并评估不阻塞本轮。R2C.4 依赖 R2C.1/R2C.2 的暂停和收尾边界。实施中可按实际代码内聚性合并文件修改，不为切片强造类或拆文件。
+
+必须检查并删除：同步世代等待入口；Endpoint raw generation/Engine 捷径；完整 owner 的 User Service 注册；进程 manager 的 Loop 节拍；Action 内长等待与旧 Signal 唤醒；重复 Job 等待/停止动作及无消费者配置；Scheduler 绕过收敛/保留的返回分支；掩盖上述旧契约的测试与文档。
+
+## 10. 验证与文档交付
+
+测试以 owner 契约为主，跨模块保留代表性闭环，不用 sleep 精确毫秒或私有字段快照固化实现。竞争测试用可控 gate/barrier，超时仅作死锁保护。
+
+| 验证边界 | 必要场景 |
+|---|---|
+| 生命周期 | 启动中关闭；双关闭；restart 与旧 callback；reload 候选清理时提交新根；reload/shutdown；owner 写取消后 join |
+| 完成 | queued/preparing/running/finalizing 的取消；必要 finish 失败；Session 已提交后取消；Reflection 取消保留目标和提交事实；close 不改主结果 |
+| 容量 | 取消次数超过保留上限；取消与分派竞争；已淘汰 Handle 仍可 wait；队列与路由引用均有界 |
+| 服务 | User 无长期写入口、对应 Reflection 有真实写能力；async 调用不阻塞；成功换代/旧世代关闭/相关日切后失效，候选失败不误废弃仍有效服务；同名跨日资源不误写 |
+| 情景策略 | 同一 domain 内普通/专属动作分别控制；域默认与动作覆盖解析一致；配置不能越过 profile 权限；未知身份明确失败；backend 不可用不能被配置开启；Phase1/Phase2/实际执行一致；伪造范围外调用或批次不能写入；三个 profile 视图互不污染 |
+| Reflection 触发 | 普通对话无 Reflection 提示/动作/专属服务；日常自动请求去重；单次用户授权形成一个指定目标的独立请求，重复受理不重复执行；整理要求进入对应 profile；排队不抢占当前根、不形成持续许可；受理与完成分别报告 |
+| 等待 | Job 在登记前/登记中/超时同时完成；无关事件不唤醒；同一旧进度不重复唤醒；输入中断 EVENT/TIMER/INPUT；旧问题不复活 |
+| 预算与输入 | 条件与 grant 两种到达顺序；Job 终态和追加输入不补额；暂停期间容量拒绝不静默丢已接受记录；取消始终可达 |
+| 集成 | User/Home Reflection/Memory Reflection 共用内核；CLI 与已有 HTTP 走统一入口；fake provider 的包外 SDK/CLI；生成 catalog 与 wheel 一致 |
+
+标准顺序：Conda `TinySoul` → 修改 owner 的聚焦测试 → Fast → `./scripts/test.ps1 -Suite Full` → `./scripts/typecheck.ps1`。Generation/wheel 属于 Full 的本地发布验收；真实 provider/network 单独声明是否执行，不用跳过本地测试代替修复。
+
+实施时即时同步 `docs/design/agent.md`、`runtime.md`、`loop.md`、`context.md`、`reflection.md` 与实际涉及的 owner 设计。Endpoint 有改动则更新 `docs/endpoint/` 相应协议；本轮不修改前端代码。设计文档只写已落地能力，不提前把本方案写成事实。
+
+结束核对清单：
+
+- [x] F1–F6 各有实现、必要测试和通过记录；未解决项仍显式保留。
+- [x] 每个新增 SPI/Service/状态字段均有生产消费者；无平行事实或兼容路径。
+- [x] 三层失败、取消边界、Observation 旁路、owner 权限与依赖方向符合 AGENTS 和主计划。
+- [x] R2 原承诺的等待、SDK 服务、生命周期和所有现有消费者形成完整闭环。
+- [x] C1/C2 已落实：Reflection 自动触发与用户单次授权分义，正常对话能力不扩权，旧服务按世代/日期失效并重新获取。
+- [x] C3 以现有 TurnProfile 承载执行情景，domain/action 策略与 Service 权限一致；无平行情景状态机，无共享 catalog 的情景开关；C4 未实施则明确留在后续评估。
+- [x] 主计划仅更新状态、链接与必要名称；S3–S7 未实施部分未被误勾选。
+- [x] Full/typecheck 与生成/wheel 等必要证据完整；记录未执行的 external 验证。
+- [x] 本文件标为 done、加 `-done-` 并移到 `docs/analysis/done/`，修正引用；此时才能恢复 S2 done。
+
+## 11. 已确认决定与实施核对
+
+维护者已确认 C1/C2，并明确 Reflection 的手动授权只针对本次整理；随后补充执行情景与更细的 action 策略方向。以下区分已落实语义与后续归并评估；实现和验证位置见第 12 节。主计划已确认的单根 Turn、SUSPEND、Job 不跨 Turn、按段注入 Context、User 长期写边界不变。
+
+| 编号 / 状态 | 语义与设计方向 | 实施约束 |
+|---|---|---|
+| C1 `confirmed` | Reflection 是 Agent 自己使用的插件能力，由日切/每日策略触发，或在用户明确允许本次整理后安排一次独立 Reflection Turn；正常对话不需要 Reflection | 进入对应 profile 时提供提示、语境与能力；手动授权限本次指定目标，不是持续许可；普通 User 不挂载 Reflection 请求/整理动作或专属写服务；SDK 不另开长期管理写入口，详见 6.3 |
+| C2 `confirmed` | 服务绑定世代，日级服务同时绑定日期；切换后旧对象失效，由调用者重新获取 | 在副作用前校验，禁止自动重绑或默默重试写入；失败 reload 若保留有效原世代则不使原服务失效，详见 6.2 |
+| C3 `implemented` | Reflection 是同一 Agent 的专门执行情景；TurnProfile 承载情景，支持 domain 与 action 两级能力策略 | 复用现有 Action 视图与配置解析，在 R2C.3 统一可见、执行与 Service 权限；三个现有情景为真实消费者，详见 6.4 |
+| C4 `deferred` | Reflection 专属动作未来可归入 Home/Memory 通用能力分组，仅在对应情景开放 | 用户将其列为可自然落实时考虑的长期方向；代码评估显示涉及规划域和动作身份迁移，列入 S3 评估，不作为 R2 完成条件；当前名称与 domain 保留，详见 6.4 |
+
+讨论中曾提出让普通 User Turn 通过插件动作自行请求 Reflection；维护者澄清正常对话不需要该能力，此推导已撤回，不纳入实施。显式用户授权经请求入口排队，与模型在普通对话中自行安排整理是不同的受理来源。
+
+实施按 R2C.1→R2C.2→R2C.3→R2C.4→R2C.5→R2C.6 推进，C1/C2 不再是待确认项。本轮已完成实现、文档同步和验收；后续若实际接口暴露新的所有权或行为冲突，先记录冲突和选择，再修改边界，不用局部兼容补丁绕过。
+
+## 12. 2026-09-17 完成证据与范围复核
+
+| 切片 | 已落地边界 | 代表性验证 |
+|---|---|---|
+| R2C.1 | `agent/sdk.py` 统一生命周期任务与受理关闭；`runtime/generation/handle.py` 改为 async lease；`agent/day.py` 固定世代→日→owner 顺序；ConfigController/资源作用域 join 已受理操作 | `tests/runtime/test_generation.py` 的失败激活与取消 writer；`tests/agent/test_sdk.py` 的启动中关闭、重复关闭、旧 Commands、失败候选期间新根、reload/shutdown 竞争；`tests/infra/test_staging.py` 的取消后清理 |
+| R2C.2 | `TurnResult` 从 owner outcome 投影；未执行请求使用 RequestFailure；`TurnState.FINALIZING` 固定完成意图；Scheduler 共用收敛/保留出口；Reflection 取消保留任务身份、目标与底层 outcome | SDK Session 提交后迟到取消；`tests/agent/test_scheduler.py` 连续 queued 取消超过保留上限、句柄淘汰后仍可读取；Loop/Reflection 必要 finish 与清理边界回归 |
+| R2C.3 | `infra/services.py` 统一调用作用域；Home/Memory/Session/Workspace 注入实际受限门面；`agent/services.py` 验证世代与日期；`ActionPolicy` 同时约束目录、归一化、批次和执行；三个 profile 独立装配；ReflectionRequest 承载单次目标和 instructions | 三 profile 权限与视图隔离；同域 action 覆盖、越权/未知配置、伪造批次拒绝；旧服务在 reload/restart/日切后拒绝写入、失败 reload 保留；SDK 写取消后 join；Reflection 请求去重、提示注入且无 User Session |
+| R2C.4 | `completion.py` 解析等待意图；`TurnInbox.wait_for_cycle` 同时判断普通条件和预算；`kernel/jobs/actions.py` 提供通用监督；JobRegistry 单调终态；进程 manager 只保留执行和候选资源职责 | Inbox 事件/grant 两种顺序、旧事件不重唤醒、输入中断三种等待、timer 不重置；Job 登记前后完成、预留容量、关闭失败保留终态；SDK append/reply/grant/cancel 闭环 |
+| R2C.5 | Endpoint 移除 raw generation/owner 捷径，await 相同 Service；CLI/HTTP 明确 Home 或带日期 Memory 手动请求；配置目录及 standard/development 模板增加情景策略；删除旧 execution.wait/stop、SignalWatch 与进程节拍配置 | Endpoint API、fake-provider CLI、生成 catalog、wheel 包外 SDK 与 init/reset；当前代码/模板检索无旧等待入口 |
+| R2C.6 | 同步 Agent/Runtime/Loop/Context/Action/Reflection、相关 owner/capability 设计及 Endpoint 协议；复核 AGENTS 的三层失败、取消、依赖和状态所有权；完成计划归档及主计划状态更新 | 以下完整本地门禁与静态核对 |
+
+配置落点为 `loop.user.actions`、`maintenance.home.actions` 和 `maintenance.memory.actions`，各自包含 `domains`/`actions` 布尔选择；显式 action 选择覆盖域默认，授权集合与 backend 可用性仍是上限。此配置不改变已有动作身份，不向普通 User 提供 Reflection 整理能力。
+
+2026-09-17 验证记录：
+
+- 聚焦 Agent/SDK/Action policy/Job/Reflection/资源收尾验证：79 项通过；最终 SDK/Home 聚焦 87 项通过，包含 reload/shutdown 竞争。
+- 标准 Fast：`1085 passed, 2 skipped, 28 deselected`。
+- 最终 `scripts/test.ps1 -Suite Full`：`1091 passed, 2 skipped, 23 deselected`，包含生成资源、导入边界、新进程包导入、fake-provider CLI 与 wheel 隔离安装/包外 SDK 验收。
+- `scripts/typecheck.ps1`：`All checks passed!`；使用 Conda TinySoul 解释器及 PowerShell ExecutionPolicy Bypass。
+- `git diff --check` 通过；未触碰用户运行数据和前端代码，未提交 Git。
+- 一条现有 Starlette/httpx 弃用警告不影响门禁。真实 provider/network external 验证未执行，Full 按约定排除 external。
+
+AGENTS 核对：局部 Action 失败仍为结构化结果；配置/服务失效停在其公共边界，运行期 owner 失败继续经所属 bridge；Observation 不控制业务；完成结果与清理诊断分离。新增服务由 Action、段、SDK 或 Endpoint 实际消费，Engine 仍是唯一事实 owner；没有新增持久授权状态、平行情景状态机或兼容动作别名。
+
+最终消费者核对同时移除了 Home facade 的三个无调用者入口及迁移后无生产消费者的 LocalActionExecutor；对应 owner 方法仍保留在真正消费它们的 Home 内部。领域 Action 统一使用 async Service 与 JoinedOperations，未保留旧同步执行器接口。
+
+本轮关闭 F1–F6，恢复主计划 S2 完成状态。C1/C2/C3 已落实；C4 的 Home/Memory 动作归并、S3 的 Session organize/Workspace 去 CAS/完整 execution 合并、S4 的真实环境来源深化、S5 的 Endpoint v2、S6 的 ACP/MCP 及 S7 的全仓统一仍属后续范围，本记录不宣称这些阶段完成。

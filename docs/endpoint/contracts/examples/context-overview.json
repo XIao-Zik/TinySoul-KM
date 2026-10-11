@@ -1,0 +1,222 @@
+{
+  "generation_id": "generation_b54437c9bfd74388b38c1efe4f219d78",
+  "captured_at": "2026-10-06T15:04:16.178908+00:00",
+  "turn_id": "2026-10-06/1",
+  "measurement": "characters_and_inline_image_bytes_not_tokens",
+  "day": "2026-10-06",
+  "segments": [
+    {
+      "id": "identity",
+      "owner": "context",
+      "slot": "background",
+      "shape": "state",
+      "order": 10,
+      "capabilities": [],
+      "root_refs": [],
+      "chars": 17,
+      "image_bytes": 0,
+      "available_refs": [],
+      "loaded_refs": [],
+      "protected_refs": []
+    },
+    {
+      "id": "session",
+      "owner": "session",
+      "slot": "background",
+      "shape": "map",
+      "order": 20,
+      "capabilities": [
+        "inspect",
+        "query",
+        "reclaim",
+        "search"
+      ],
+      "root_refs": [
+        "session:map"
+      ],
+      "chars": 197,
+      "image_bytes": 0,
+      "available_refs": [],
+      "loaded_refs": [],
+      "protected_refs": []
+    },
+    {
+      "id": "inputs",
+      "owner": "context",
+      "slot": "background",
+      "shape": "state",
+      "order": 30,
+      "capabilities": [],
+      "root_refs": [],
+      "chars": 46,
+      "image_bytes": 0,
+      "available_refs": [],
+      "loaded_refs": [],
+      "protected_refs": []
+    },
+    {
+      "id": "journal",
+      "owner": "context",
+      "slot": "background",
+      "shape": "state",
+      "order": 39,
+      "capabilities": [],
+      "root_refs": [],
+      "chars": 0,
+      "image_bytes": 0,
+      "available_refs": [],
+      "loaded_refs": [],
+      "protected_refs": []
+    },
+    {
+      "id": "home",
+      "owner": "home",
+      "slot": "background",
+      "shape": "heap",
+      "order": 40,
+      "capabilities": [
+        "reclaim",
+        "select"
+      ],
+      "root_refs": [],
+      "chars": 11633,
+      "image_bytes": 0,
+      "available_refs": [
+        "home:top/agent/AGENT",
+        "home:top/agent/context/background",
+        "home:top/agent/context/turn-trace",
+        "home:top/agent/context/working",
+        "home:top/agent/contract",
+        "home:top/agent/identity/identity",
+        "home:top/agent/identity/soul",
+        "home:top/agent/long-contract",
+        "home:top/agent/user/user",
+        "home:top/skills/tinysoul-docs"
+      ],
+      "loaded_refs": [
+        "home:top/agent/AGENT",
+        "home:top/agent/identity/identity",
+        "home:top/agent/identity/soul",
+        "home:top/agent/context/background",
+        "home:top/agent/context/turn-trace",
+        "home:top/agent/context/working",
+        "home:top/agent/user/user"
+      ],
+      "protected_refs": [
+        "home:top/agent/AGENT",
+        "home:top/agent/identity/identity",
+        "home:top/agent/identity/soul",
+        "home:top/agent/context/background",
+        "home:top/agent/context/turn-trace",
+        "home:top/agent/context/working",
+        "home:top/agent/user/user"
+      ]
+    },
+    {
+      "id": "memory",
+      "owner": "memory",
+      "slot": "background",
+      "shape": "heap",
+      "order": 50,
+      "capabilities": [
+        "reclaim",
+        "select"
+      ],
+      "root_refs": [],
+      "chars": 194,
+      "image_bytes": 0,
+      "available_refs": [
+        "memory:current"
+      ],
+      "loaded_refs": [
+        "memory:current"
+      ],
+      "protected_refs": [
+        "memory:current"
+      ]
+    },
+    {
+      "id": "trace",
+      "owner": "context",
+      "slot": "trace",
+      "shape": "stack",
+      "order": 10,
+      "capabilities": [
+        "inspect",
+        "query",
+        "reclaim",
+        "search"
+      ],
+      "root_refs": [
+        "turn:trace/2026-10-06/1"
+      ],
+      "chars": 1729,
+      "image_bytes": 0,
+      "available_refs": [],
+      "loaded_refs": [],
+      "protected_refs": []
+    },
+    {
+      "id": "plan",
+      "owner": "context",
+      "slot": "working",
+      "shape": "state",
+      "order": 10,
+      "capabilities": [],
+      "root_refs": [],
+      "chars": 28,
+      "image_bytes": 0,
+      "available_refs": [],
+      "loaded_refs": [],
+      "protected_refs": []
+    },
+    {
+      "id": "workspace",
+      "owner": "workspace",
+      "slot": "working",
+      "shape": "state",
+      "order": 20,
+      "capabilities": [],
+      "root_refs": [],
+      "chars": 623,
+      "image_bytes": 0,
+      "available_refs": [],
+      "loaded_refs": [],
+      "protected_refs": []
+    },
+    {
+      "id": "jobs",
+      "owner": "jobs",
+      "slot": "working",
+      "shape": "state",
+      "order": 30,
+      "capabilities": [],
+      "root_refs": [],
+      "chars": 360,
+      "image_bytes": 0,
+      "available_refs": [],
+      "loaded_refs": [],
+      "protected_refs": []
+    },
+    {
+      "id": "connections",
+      "owner": "subagent",
+      "slot": "working",
+      "shape": "state",
+      "order": 40,
+      "capabilities": [],
+      "root_refs": [],
+      "chars": 0,
+      "image_bytes": 0,
+      "available_refs": [],
+      "loaded_refs": [],
+      "protected_refs": []
+    }
+  ],
+  "resolved_references": {
+    "memory:current": {
+      "ref": "memory:current",
+      "day": "2026-10-06"
+    }
+  }
+}

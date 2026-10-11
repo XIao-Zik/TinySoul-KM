@@ -1,0 +1,26 @@
+name = "expand.search"
+domain = "expand"
+
+[tool]
+description = "Compose query, directory, refs, result, filter, select and rerank over the declared MCP server/tool directory. Models receive real tool descriptions; provider/model choices remain internal bindings."
+
+[tool.schema]
+type = "object"
+required = ["source"]
+additionalProperties = false
+
+[tool.schema.properties.source]
+type = "object"
+
+[tool.schema.properties.steps]
+type = "array"
+
+[tool.schema.properties.page]
+type = "object"
+
+[semantic]
+use_when = ["Locate known tool names or parameters with literal/regex query", "Discover tools semantically with directory and explicit select/rerank steps; narrow server scope when requested"]
+effects = ["read_only"]
+
+[execution]
+executor = "expand.search"

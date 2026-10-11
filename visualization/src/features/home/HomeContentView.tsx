@@ -1,0 +1,229 @@
+/**
+ * Home content reader (center, plan §11).
+ *
+ * Pages one resource's {ref, text} chunks in the selected view (effective or
+ * actual) and renders them through the chunked Markdown reader; the document
+ * metadata installs its direct refs for the References panel. Reading never
+ * changes the model-side load state, and a missing/invalid resource stays a
+ * clear fact — a non-text resource shows its reference and the actually
+ * supported operations (copy, quote, references), never a fake download.
+ */
+
+import { useEffect, useMemo, type ReactElement } from "react";
+import {
+  AlertTriangle,
+  Copy,
+  FileWarning,
+  Link2,
+  Loader2,
+  MessageSquareQuote,
+  RotateCcw,
+} from "lucide-react";
+
+import type {
+  HomeContentItem,
+  HomeContentMetadata,
+  HomeContentPage,
+  HomeView,
+} from "../../api/v2/types";
+import { apiErrorCode } from "../../api/v2/errors";
+import { nextContinuation } from "../../api/v2/pagination";
+import { Badge } from "../../components/ui/Badge";
+import { Button, IconButton } from "../../components/ui/Button";
+import { EmptyState } from "../../components/ui/EmptyState";
+import { useT } from "../../i18n";
+import { useConnectionStore } from "../../store/connectionStore";
+import { ChunkedMarkdown, directReferences, isReferenceItem } from "../resources/ChunkedMarkdown";
+import { copyReference, quoteReference } from "../resources/router";
+import { useOwnerPage } from "../resources/useOwnerPage";
+import { useHomePage } from "./store";
+
+export function HomeContentView({
+  epoch,
+  ref,
+  view,
+  fragment,
+}: {
+  epoch: number;
+  ref: string;
+  view: HomeView;
+  fragment: string | null;
+}): ReactElement {
+  const t = useT();
+  const rightPanel = useHomePage((s) => s.rightPanel);
+  const page = useOwnerPage<HomeContentItem, HomeContentPage, HomeContentMetadata>(
+    (token, signal) => {
+      const clients = useConnectionStore.getState().clients;
+      if (clients === null) {
+        return Promise.reject(new Error(t("Not connected to a backend.")));
+      }
+      return clients.home.content(
+        { ref, view, continuation: token ?? undefined },
+        { signal },
+      );
+    },
+    nextContinuation,
+    (page) =>
+      page.metadata ?? { locator: { ref, view } },
+    [epoch, ref, view],
+  );
+
+  // The References panel reads the current document's direct refs from here.
+  const directRefs = useMemo(() => directReferences(page.items), [page.items]);
+  useEffect(() => {
+    if (page.metadata === null) return;
+    useHomePage.getState().setCurrentDirectRefs(directRefs);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page.metadata, directRefs]);
+
+  const errorCode = apiErrorCode(page.error);
+  const errorMessage =
+    page.error instanceof Error ? page.error.message : String(page.error ?? "");
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex items-start gap-2 border-b border-line px-4 py-2">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13px] font-medium" title={ref}>
+            {ref.replace(/^home:/, "")}
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-fg-faint">
+            <Badge tone={view === "effective" ? "accent" : "gray"}>{view}</Badge>
+            <span className="truncate font-mono">{ref}</span>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <IconButton
+            label={t("References and backlinks")}
+            active={rightPanel === "references"}
+            onClick={() =>
+              useHomePage
+                .getState()
+                .setRightPanel(rightPanel === "references" ? "none" : "references")
+            }
+          >
+            <Link2 size={15} />
+          </IconButton>
+          <IconButton label={t("Copy reference")} onClick={() => copyReference(ref)}>
+            <Copy size={15} />
+          </IconButton>
+          <IconButton
+            label={t("Quote in conversation")}
+            onClick={() => quoteReference(ref, { ref, homeView: view })}
+          >
+            <MessageSquareQuote size={15} />
+          </IconButton>
+        </div>
+      </div>
+
+      {page.loading ? (
+        <div className="flex flex-1 items-center justify-center gap-2 text-[12px] text-fg-faint">
+          <Loader2 size={15} className="animate-spin-slow" />
+          {t("Reading the document…")}
+        </div>
+      ) : errorCode === "resource.invalid" ? (
+        // Not UTF-8 text: show the reference and the supported operations,
+        // never a disguised Workspace download.
+        <div className="flex flex-1 items-center justify-center p-6">
+          <EmptyState
+            icon={<FileWarning size={24} />}
+            title={t("Not readable as text")}
+            description={
+              <>
+                <span className="font-mono text-[11px]">{ref}</span>{" "}
+                {t(
+                  "is not a UTF-8 text resource, so the page cannot preview it. You can still copy its reference or quote it in the conversation.",
+                )}
+              </>
+            }
+            action={
+                <Button variant="outline" size="sm" onClick={() => copyReference(ref)}>
+                  <Copy size={13} />
+                  {t("Copy reference")}
+                </Button>
+            }
+          />
+        </div>
+      ) : errorCode === "resource.not_found" ? (
+        <div className="flex flex-1 items-center justify-center p-6">
+          <EmptyState
+            icon={<FileWarning size={24} />}
+            title={t("Not in the {view} view", { view })}
+            description={
+              <>
+                <span className="font-mono text-[11px]">{ref}</span>{" "}
+                {t("does not exist in the {view} Home", { view })}
+                {view === "actual"
+                  ? t(
+                      ". It may exist only as an overlay change — check the effective view.",
+                    )
+                  : "."}
+              </>
+            }
+          />
+        </div>
+      ) : page.error !== null && page.items.length === 0 ? (
+        <div className="flex flex-1 items-center justify-center p-6">
+          <EmptyState
+            icon={<AlertTriangle size={24} />}
+            title={t("The document could not be read")}
+            description={errorMessage}
+            action={
+              <Button variant="outline" size="sm" onClick={page.reload}>
+                <RotateCcw size={13} />
+                {t("Retry")}
+              </Button>
+            }
+          />
+        </div>
+      ) : page.items.length === 0 ? (
+        // Empty is a fact of the document, distinct from missing above.
+        <div className="flex flex-1 items-center justify-center p-6">
+          <EmptyState
+            title={t("This document is empty")}
+            description={
+              <>
+                <span className="font-mono text-[11px]">{ref}</span>{" "}
+                {t("exists in the {view} Home but has no content.", { view })}
+              </>
+            }
+          />
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto px-2 py-3">
+          <div className="reading-column mx-auto w-full max-w-[76ch]">
+          <ChunkedMarkdown
+            items={page.items.filter((item) => !isReferenceItem(item))}
+            fragment={fragment}
+            origin={{ ref, homeView: view }}
+          />
+          </div>
+        </div>
+      )}
+
+      {page.error !== null && page.items.length > 0 && (
+        <div className="flex items-center gap-2 border-t border-line bg-danger-soft px-4 py-2 text-[12px] text-danger">
+          <AlertTriangle size={12} className="shrink-0" />
+          <span className="min-w-0 flex-1">{errorMessage}</span>
+          <Button variant="ghost" size="xs" onClick={page.reload}>
+            <RotateCcw size={12} />
+            {t("Retry")}
+          </Button>
+        </div>
+      )}
+
+      {!page.loading && page.next !== null && (
+        <div className="border-t border-line px-4 py-2">
+          <Button
+            variant="outline"
+            size="xs"
+            loading={page.loadingMore}
+            onClick={page.loadMore}
+          >
+            {t("Show more")}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}

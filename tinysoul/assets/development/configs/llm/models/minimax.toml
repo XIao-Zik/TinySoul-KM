@@ -1,0 +1,21 @@
+[llm.models.minimax_m3]
+family = "minimax"
+collapsed = false
+adapter = "minimax"
+providers = [
+  { provider = "orca", provider_model = "minimax/minimax-m3" },
+  { provider = "minimax", provider_model = "MiniMax-M3" },
+]
+context_window_tokens = 262144
+capabilities = [
+  "text_input",
+  "image_input",
+  "image_remote_url",
+  "tool_calling",
+  "reasoning_output",
+]
+
+[llm.models.minimax_m3.adapter_options]
+reasoning_keep = "content"
+thinking = "adaptive"
+reasoning_split = true

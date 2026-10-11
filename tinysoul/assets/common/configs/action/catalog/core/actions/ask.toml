@@ -1,0 +1,48 @@
+name = "core.ask"
+domain = "core"
+
+[tool]
+description = "Ask for a decision or missing information and pause this Turn until the matching reply arrives. Ordinary additional input does not answer the question."
+
+[tool.schema]
+type = "object"
+required = ["question"]
+additionalProperties = false
+
+[tool.schema.properties.question]
+type = "string"
+description = "The core question the user should answer. Together with details, this forms the complete question body."
+maxLength = 16000
+
+[tool.schema.properties.details]
+type = "string"
+description = "The explanation needed to understand and answer the question: relevant findings, choices, tradeoffs or advice. Supports Markdown; may be omitted for a self-explanatory question."
+maxLength = 16000
+
+[tool.schema.properties.options]
+type = "array"
+description = "Optional choices with stable IDs. A reply identifies one ID, or supplies free text when allow_other is true."
+maxItems = 8
+items = { type = "object", required = ["id", "label"], additionalProperties = false, properties = { id = { type = "string", minLength = 1, maxLength = 128 }, label = { type = "string", minLength = 1, maxLength = 256 }, description = { type = "string", maxLength = 2000 } } }
+
+[tool.schema.properties.allow_other]
+type = "boolean"
+description = "Allow a free-text response alongside choices. Defaults to true."
+
+[tool.schema.properties.timeout_seconds]
+type = "number"
+minimum = 0.001
+description = "Optional waiting limit. Omit to wait until reply or cancellation."
+
+[semantic]
+use_when = ["Continuing needs the user's decision or information"]
+avoid_when = ["The information can be investigated independently"]
+effects = ["read_only"]
+examples = ["Ask the user to choose a project direction, then continue in this Turn"]
+
+[runtime]
+timeout_seconds = 5
+parallel_policy = "serial"
+
+[execution]
+executor = "core.ask"

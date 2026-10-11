@@ -1,0 +1,29 @@
+TinySoul Visualization — c479ca0 presentation on v2
+=================================================
+
+Completed: 2026-10-02
+
+Plan:
+  docs/analysis/done/20261001-done-visualization-chat-v2-baseline-restoration-plan.md
+Implementation record (relative to visualization):
+  docs/plans/20261002-v2-baseline-restoration-progress.md
+
+The frontend restores continuous daily conversations, LiveStatus,
+thinking/action previews, anchored scrolling, answer transitions and Turn
+Trace using v2 owner projections and scoped Observation events. Model-call
+messages open beside Trace; the top-right Context inspector has separate
+current Context, Session map, loaded Home and loaded Memory tabs.
+
+Settings uses frontend Chinese mappings for page copy and catalog metadata.
+Search accepts Chinese, source text and field paths. Stable IDs and stored
+values stay unchanged; unknown metadata falls back to the source language.
+
+Validation:
+  Vitest: 88 files / 789 tests passed; final ChatView regression 15 passed
+  TypeScript and Vite production build: passed
+  Python Full: 1223 passed / 25 deselected; typecheck: passed
+  Real local Agent/Endpoint browser flow and visual tour: passed
+
+Browser tests use a scripted model runner, without external provider calls.
+Screenshot artifacts are generated under visualization/.local-test/.
+Production backend APIs were not changed in this implementation.

@@ -1,0 +1,86 @@
+name = "core.reason"
+domain = "core"
+
+[tool]
+description = "Run a focused internal reasoning step and return a JSON object."
+
+[tool.schema]
+type = "object"
+required = ["guide_blocks", "output_blocks"]
+additionalProperties = false
+
+[tool.schema.properties.guide_blocks]
+type = "array"
+description = "Required reasoning guidance blocks."
+
+[tool.schema.properties.guide_blocks.items]
+type = "object"
+required = ["text"]
+additionalProperties = false
+
+[tool.schema.properties.guide_blocks.items.properties.label]
+type = "string"
+description = "Optional stable label for this guide block."
+
+[tool.schema.properties.guide_blocks.items.properties.text]
+type = "string"
+description = "Guide text for the reasoning task."
+
+[tool.schema.properties.input_blocks]
+type = "array"
+description = "Optional reasoning input blocks."
+
+[tool.schema.properties.input_blocks.items]
+type = "object"
+required = ["text"]
+additionalProperties = false
+
+[tool.schema.properties.input_blocks.items.properties.label]
+type = "string"
+description = "Optional stable label for this input block."
+
+[tool.schema.properties.input_blocks.items.properties.text]
+type = "string"
+description = "Input text for this prompt block."
+
+[tool.schema.properties.references]
+type = "array"
+description = "Optional read-only resource references resolved into task prompt blocks."
+
+[tool.schema.properties.references.items]
+type = "string"
+description = "Read-only resource reference, for example workspace:docs/task.md."
+
+[tool.schema.properties.output_blocks]
+type = "array"
+description = "Required JSON output protocol blocks."
+
+[tool.schema.properties.output_blocks.items]
+type = "object"
+required = ["text"]
+additionalProperties = false
+
+[tool.schema.properties.output_blocks.items.properties.label]
+type = "string"
+description = "Optional stable label for this output block."
+
+[tool.schema.properties.output_blocks.items.properties.text]
+type = "string"
+description = "Expected output instructions for the reasoning task."
+
+[semantic]
+use_when = ["Need a bounded internal reasoning step before choosing the next action or final answer"]
+avoid_when = ["A direct final answer is already ready", "A concrete workspace or home action is required instead"]
+effects = ["read_only"]
+examples = ["Analyze read-only references and return a JSON decision object"]
+
+[runtime]
+timeout_seconds = 600
+parallel_policy = "serial"
+
+[runtime.hooks]
+normalize = []
+execute = []
+
+[execution]
+executor = "core.reason"

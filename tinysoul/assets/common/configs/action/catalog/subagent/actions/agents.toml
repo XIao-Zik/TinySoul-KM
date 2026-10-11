@@ -1,0 +1,17 @@
+name = "subagent.agents"
+domain = "subagent"
+
+[tool]
+description = "List configured external Agent targets."
+
+[tool.schema]
+type = "object"
+required = []
+additionalProperties = false
+
+[semantic]
+use_when = ["List configured external Agent targets."]
+effects = ["read_only"]
+
+[execution]
+executor = "subagent.agents"

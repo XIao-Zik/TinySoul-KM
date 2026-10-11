@@ -1,0 +1,580 @@
+# Agent 重构第七轮子计划：会话整理与架构收口
+
+状态：`done`（R7-0–R7-5 已逐项完成，S3 Organize 尾项与 S7 已核对；实施、文档和本地门禁证据见 §13）。
+日期：2026-09-21。
+分析基线：`55030b6`，R6 实现已提交；本次分析开始时工作区干净。
+实施准备复核：`b5ba2cb`，已提交地图引用与线性交互正文方案；复核开始时工作区干净，结论见 §12.1。
+实施基线：`bb496be`；2026-09-21 完成实施核对，未修改实际部署数据。
+主计划：[Agent 架构重构执行计划](20260915-done-agent-architecture-refactor-plan.md)。
+前置记录：[Before 4](20260920-done-Agent重构Before4子计划-数据基础与渐进披露.md)、[R6](20260921-done-Agent重构第六轮子计划-外部Agent与MCP能力接入.md)。
+
+## 1. 本轮定位与推进判断
+
+已确认 R7 承接主计划 §8 的 Organize 尾期能力，补齐 S3 剩余项，再完成 S7 的架构、规约、文档与发布验证收口。S3 与 S7 分别验收，不能因为新增 Action 可调用就宣布主重构完成。
+
+R1–R6 已经建立唯一的 Agent/Turn 生命周期、插件贡献、Context 段、环境事件、Job、SDK/Gateway 与外部能力入口。本轮沿这些入口实现，不再组织一次全面替换框架的重构。核对中有证据的职责重复、失效入口和语义残留属于收口；需要新增产品能力或改变已确认所有权的问题另行讨论。
+
+主计划 D37/D39 及 §8 已明确的以下方向不再列为待决：
+
+- 整理当前活动日、本轮开始前已结束的多个 User Turns 及已有地图，包含失败、取消记录；不限上一成功 Turn。
+- 不可变事实与可修订解释分离；Session 持有解释，Memory 持有长期知识。
+- `core.session.organize` 由 Session 实现；模型在正常 Phase2 给出变更，Action 不再调用隐藏 LLM。
+- 当前已接受输入或已结算行动可以为修订旧理解提供新证据，但不把活动 Turn 提前写成已完成历史。
+- map 与 turns 同日归档，新日不继承旧图；Reflection 继续独立情景，共用原有内核。
+
+本轮取舍与确认状态集中于 §11。§2 和 §12.1 保留实施前分析基线；实际实施、验证和主计划核对见 §13。设计文档按已经落地的能力同步，主计划范围保持不变。
+
+## 2. 实施前基线与实际接点
+
+| 已核对位置 | 当前实现 | R7 工作 |
+|---|---|---|
+| `plugins/session/records/{models,store,reconcile}.py` | v10 不可变 Turn records、v3 manifest、原子记录与孤立记录收养；没有注释持久化 | 增加 Session 自有注释文档，保留既有事实提交边界 |
+| `plugins/session/views/{inspection,navigation,background}.py` | 从记录派生确定性图；Background 与导航分别构造问答摘录，尚未统一呈现完整交互流 | 同一 session 段组合语义地图引用与线性交互正文，共用事实投影和导航/query/分页 |
+| `plugins/session/projection.py` | Session 段只读，支持 inspect/query/自身水位回收 | User 情景增加真实 prepare/install 更新；历史来源集合仍固定 |
+| `plugins/session/{services,plugin}.py` | 显式只读 Service、段贡献与可选完成 recorder，没有 Action | 加入受约束整理服务与 Action 贡献，继续单一完成管线 |
+| `plugins/session/completion.py` | 完成时将 Trace input/action 引用投影为 Session occurrence 引用 | 提炼同一引用投影供运行中证据校验与最终记录复用 |
+| `kernel/context/{engine,builtin/trace}.py` | 当前输入与 Trace 事实有稳定身份；公开 inspect、seal_trace 和 end_turn | 补足所需的只读事实访问，不提前 end_turn，不让 kernel 解释 Session 图 |
+| `kernel/registration.py`、Memory Action 与段更新 | 已有类型化服务注入、Action 提交后 Signal、段候选安装 | 复用同一路径，无 Organize 调度器或新的段能力大基类 |
+| `agent/services.py` | SDK SessionService 只读，受世代/日 lease 约束 | 保留对外读取；整理服务只注入需要它的 profile，见 Q3 |
+| `AGENTS.md`、主计划 §7.1 等状态说明 | AGENTS 正文仍有旧模块/Job/Memory/日期语义，由过渡条款覆盖；部分计划现状描述保留较早基线 | S7 合并为当前规约，按实现修正过时状态说明；历史记录仍保留 |
+
+R6 归档记录的门禁是 Windows Full `1130 passed, 23 deselected`，包括生成/wheel，以及 Windows/Linux 目标 typecheck。这是前一轮证据，本次设计分析未重新运行，不能作为 R7 验收。
+
+## 3. 所有权与正常数据流
+
+唯一主线：
+
+```text
+已有 Session Map / core.context.inspect
+  → 当前 Agent 在 Phase2 提交整理意图
+  → Session Action 校验参数、解析证据
+  → Session owner 原子提交语义变更
+  → ActionResult + Session 更新 Signal
+  → 下一运行边界 prepare/install
+  → 同一 session 段呈现新解释；历史事实来源集合不变
+```
+
+| 对象 | 权威 owner | 更新边界 |
+|---|---|---|
+| 当前 Turn 输入、已发生行动、时间线 | Context / Trace | 既有输入安装与执行事实记录 |
+| 已完成 User Turn 原始事实 | Session records | 唯一 TurnCompletionPipeline，提交后不可改 |
+| thread/note 与推导关系 | Session annotations | Organize 的单文档原子提交 |
+| 当前模型看到的会话地图 | Session Segment | open、只读 prepare、同步 install；render 不做 I/O |
+| 整理请求和结果 | 既有 Trace → Session completion | 与其它 Action 相同，不增设平行审计日志 |
+
+普通对话中 Agent 按需少量多步整理，不在每轮开头或结束强制执行，不用 scheduler 自动启动一个 Session Reflection Turn。没有整理过的历史仍完整可导航，整理不是 User Turn 正常运行的前置。
+
+## 4. 注释模型与存储
+
+### 4.1 同一图的两层内容
+
+事实层继续从唯一 Turn records 派生，contains/precedes/replies_to/references 等只表达已知结构，不从文本推断因果。注释层使用 frozen dataclass 和有限 StrEnum，逻辑上包含：
+
+- 语义节点：稳定身份、`thread` 或 `note`、title/body、事实 `source_refs`、active/retracted 状态。
+- 语义关系：稳定身份、source/target、有限关系类型、说明、事实 `source_refs`、active/retracted 状态。关系沿用主计划的 continues/branches_from/clarifies/revises/supports/contradicts/resolves。
+- 地图快照：当前日的节点与边；内部索引服务于校验和投影，不形成另一份业务正文。
+
+“未决问题”“目标”“假设”等由 note 内容清楚表达，不为每一种自然语言含义扩张状态机。模型推导始终标明为解释；即使来源为成功结果，也不能由注释状态改写事实状态。合理图回路可保留，不套用 Memory redirect 的无环约束。
+
+注释可以相互关联，但每项解释都要有可定位的原始事实来源，不能只引用另一条推导来循环证明。owner 检查引用确实存在及类型可用，不声称能够程序化证明解释内容正确，也不要求每个引用都有先前 inspect 调用凭证。
+
+### 4.2 写入与日生命周期
+
+语义内容单独保存为 Session root 下的 `map.json`。逻辑上更新指定对象，物理上校验整批候选后一次原子替换；成功后替换内存快照。复用现有 Session owner 锁和 joined 本地操作，不增加图数据库、CAS、编辑版本链或跨文档事务。
+
+节点/边撤回后保留同一身份及撤回状态，不复用身份表示另一事实。修订替换该对象的当前解释，历史变更沿已有 Action 事实可追溯，不复制无限对象版本。撤回节点时要求同批明确撤回其活动关系或修改端点；遗漏返回局部失败，不由工具猜测新关系。语义合并/拆分用同一 upsert/retract 表达。
+
+缺少 `map.json` 表示尚无注释：现有合规 R6 Session 可以直接以空注释打开。已有文档损坏不能静默降为空图。Turn record/manifest 的格式仅在实际需求要求时调整，不为新功能机械升级；若实现确需不兼容修改，先记录具体原因和部署处置，禁止隐式 reset 或覆盖旧数据。
+
+现有归档移动整个 Session root，连同 map 一起归档；新根为空图。同日重启/reload 重新读取当前注释；reconcile 只恢复事实索引，不覆盖注释。Archive/Reflection 复用只读视图，不创建归档写 Engine、不复制旧图进入新日。
+
+### 4.3 两类内容与同一地图的披露视图
+
+“事实历史列表 + 有来源语义解释 + 话题森林导航投影”区分的是内容性质与披露职责，不是三个独立维护、逐级加工的业务系统。Session 保存两类内容，并从它们构造同一 Map 的模型视图：
+
+| 内容或状态 | 所属职责 | 维护方式 |
+|---|---|---|
+| 原始输入、追加、追问/回复、行动、结果、时间线与资源来源 | 不可变历史事实 | 唯一完成管线保存 Turn record；结构关系按需派生 |
+| 话题、解释、Turn 归属、分支原因、合流、线索与评判 | 可修订语义解释，包含话题组织结构 | Organize 在 Session owner 内提交节点与关系 |
+| 哪些话题/Turn 展开、正文呈现多少、其余内容的入口 | 当前 Turn 的披露视图 | Session 段按已安装事实/解释及容量构造，不另存业务图 |
+
+事实以 Turn 为主粒度，保留 `input`、`action`、`timeline`、`output`、`working`、`resource` 和已有 note 的稳定 occurrence。语义解释带事实 `source_refs`，可以说明当前理解、未决方案或失败后的转向，但不能改写执行状态，也不能把推导升级为事实。模型私有推理、供应商隐藏 reasoning 和未接受的输入不进入 Session。
+
+“T4 属于话题 A”“T4 从 T1 分出另一条路线”本身就是需要保存的语义判断，归 Organize 维护；“本次展示该分支的哪些交互和线索”才属于视图。渲染器只能依据已有关系组织导航，不能从时间相邻、追加输入或文本关键词自行发明话题、分支或因果关系。
+
+森林是同一 Map 的语义导航形态。thread 下只呈现话题、解释、关系和 Turn/事实引用，不复制完整交互正文；同一 Session 段在地图下方提供按稳定历史顺序排列的线性交互投影。一个 Turn、Link 或事实可以被多个话题引用，但正文在线性区域只出现一次。合流建立新的解释入口，保留旧分支，不通过移动或删除历史节点制造唯一父节点。语义图中的多源关系或回路通过关联引用呈现，自动投影不递归展开整图。
+
+代码按 records、annotations、views 的真实职责组织，但它们都属于 Session owner；不建立独立的森林存储、第二份交互日志或需要与解释图保持同步的树。Context 只消费段投影和通用披露协议，不理解话题的领域含义。
+
+### 4.4 确定性关系、附加整理与结构重塑
+
+确定性事实关系自动派生；附加语义与结构整理共用 `core.session.organize` 的同一批原子提交：
+
+| 类型 | 例子 | 对历史事实 | 对导航 |
+|---|---|---|---|
+| 确定性事实关系 | Turn/输入/Action 的 contains、precedes、replies_to；明确保存的 Link references | 不变，系统自动可重建 | 提供基础历史列表和详情入口 |
+| 附加语义 | 给 T2 与 T3 增加 clarifies/supports/revises/contradicts，补充线索或评判 note | 不变，新增解释必须有来源 | 增加关系/线索，原路径仍可用 |
+| 结构整理 | 建立话题根、把 T1/T2/T3 编入一支、从 T1 fork 出 T4/T5、将两个分支汇合到新 thread | 不变，旧分支和 Turn ref 不移动 | 改变森林的当前导航和尾部指针，但不偷换已有 ref |
+
+确定性关系继续使用有限的 fact relation。语义关系沿用主计划的 `continues`、`branches_from`、`clarifies`、`revises`、`supports`、`contradicts`、`resolves`；若需要表达一轮带来新的用户方向，使用 `steers`，不把时间相邻自动写成因果。thread 对 Turn/事实的归属使用一个明确的结构关系（建议 `covers`），不为每种自然语言话题再创建 relation kind。`references` 只表示记录中实际保存的 Link/来源，解释层要表达“某资源推动了方向”时，使用带来源的 note 或 `supports/steers`，不伪装成资源 owner 的事实。
+
+组织方式的示意：
+
+```text
+话题 A ──covers──> T1、T2
+T2 ──continues──> T1
+话题 B ──branches_from──> T1       # 话题 A 的分支
+话题 B ──covers──> T3、T5；T3 ──continues──> T1
+T4 ──revises/contradicts──> T2     # 可仍属于 A，也可成为 B 的成员
+话题 C ──resolves/continues──> 话题 A、话题 B  # 合流的新解释入口
+T2、T5 ──references──> 资源 R
+```
+
+图上的方向是语义关系方向，不等同于外部真实因果时间。森林投影可从已保存的关系中选取一条有界回溯路径和近期尾部；其它父源、共享事实和跨话题关系通过关联入口保留。一个 Turn 可被多个 `covers` 关系引用；地图各处只链接同一 Turn ref，正文由线性交互投影按历史顺序统一呈现。展示位置不形成“唯一主要话题”的语义判断，不改写成员归属。
+
+“顺接、fork、steer、否定、澄清、汇合”都属于模型整理出的解释，不由 `precedes` 或 `reply_to` 自动推断。`reply_to` 只说明用户回答了哪个明确问题；追加输入只说明接收和可见顺序。`core.reason` 的结构化结果是可引用的 Action 事实，不能把隐藏推理或其未经整理的全文自动写成话题解释。
+
+话题整理不必每次重排全图：小批 upsert 可以只增加一条关系、一个 note 或一个新 thread，并带上 scope/source refs；后续批次再补成员、分支或合流。若修订已有解释，替换其完整语义字段及本次事实 source refs，允许更正错误引用或补充新证据；原始事实不变，旧变更及其来源由既有 Action 记录追溯，不要求错误依据永久留在当前解释中。若撤回关系，保留稳定 ref 与撤回状态。这样“附加线索”和“重塑导航”共享一个 owner 和提交边界，复杂度只来自实际的图变更，不引入第二套 map 编辑器。
+
+### 4.5 每个历史 Turn 的交互内容与身份
+
+所有已完成 Turn 都具有相同的交互披露能力，不只为最新一轮构造问答摘要。交互流由唯一 record/timeline 派生；线性交互投影、Turn inspect 和话题中的 Turn 引用共用它，不新增持久交互列表。地图只放引用，线性区域负责正文。以下名称表达模型可辨认的语义角色，具体枚举在实现中落定；它们不是新的 Action 名、ref scheme 或存储协议别名：
+
+| 交互角色 | 原始来源 | 展开时的正文语义 |
+|---|---|---|
+| `T.user.input` | 本轮初始用户输入 | 原文与 input ref |
+| `T.user.append` | 已进入本轮事实集合、无 reply_to 的后续输入 | 追加原文与独立 input ref，不能与初始输入拼成一个问句 |
+| `T.agent.reason` | 显式 `core.reason` occurrence | 行动标记、结果状态与 ref；已有明确的简短结论可呈现，不内联推理链 |
+| `T.agent.question` | 成功 `core.ask` 的规范问题内容 | 问题原文、完整有序 options 与 question/action ref |
+| `T.user.reply` | 带 reply_to 的用户输入 | 回应原文、reply_to 及对应问题；若为选择，保留原始选择表达与原选项的对应背景 |
+| `T.agent.output` | 完成管线确认的正式输出 | 最终回答原文及资源引用；`core.answer` 的同一回答不再重复展示 |
+
+输入/追问/回复可多次交错；reason 可以没有，也可以发生多次。投影按记录中的实际顺序构造，不强行排列成每种角色各出现一次的模板。Action requested/started/settled 等观察归为同一次行动，输入 installed/visible 等归为同一次输入；交互位置以输入首次进入本轮视图、行动实际开始或问题内容可用的相应时间线锚点确定。结算结果属于该行动，不声称它在开始时就已被模型知晓；更细的并行交错和可见顺序仍沿 timeline 下探。
+
+问题与回复通过已有 result_id/reply_to 确定性关联。普通 append 不因紧跟问题就被当成答案；未回答的问题保留原文和未获回复的事实，不伪造选择。若上一 Turn 最终回答提出了问题，而下一 Turn 没有框架 reply_to，则仍是下一 Turn 的初始输入；其语义关联可以由 Organize 补充，不能冒充自动 replies_to。
+
+`core.reason` 当前允许任务自定义 JSON 结果，不能假设任意结果都有通用 conclusion 字段，也不能把任意 JSON 当成安全短结论全量内联。默认保留行动标记、状态与 ref；已有明确的有限结论或带该行动来源的 Organize 解释可作为补充，并保持事实/解释标识。规范 Action 结果可沿原 ref 按既有协议检查；供应商隐藏 reasoning、加密 reasoning 和模型私有推理不成为历史交互正文或检索来源。本轮不为展示建设新的推理提取 LLM 或安全标签平台。
+
+其它 Action 的结果状态、失败摘要及资源线索可以穿插在交互流中，大输出继续只给摘要和引用。Workspace/Home/Memory 正文仍由各 owner 在显式读取时提供，不能因为交流中出现 Link 就自动进入 Map。没有正式输出时展示实际 outcome 和必要失败/取消/耗尽事实，不将未发布的候选回答展示为最终回答。
+
+追加输入的原文以及其后行动变化都可以直接出现在交互流中，让模型保有解释所需的证据；“这次追加导致放弃方案 X”仍是 Organize 可补充的解释关系。事实本身可以富含语义，不必先整理才可见，也不把解释结论反写进原话。
+
+### 4.6 地图导航与线性交互投影
+
+本轮采用“语义地图 + 线性交互正文”的同一 Session 段布局。地图区只呈现话题、解释、关系、分支、合流和 Turn/事实 ref；地图下方的线性区域按 Session 的稳定历史顺序呈现 Turn 交互正文。它不是新的 Summary、历史账本或 Context 段，而是从同一 Turn records/timeline 派生的另一种只读披露视图。
+
+线性交互区域的候选集合按以下顺序构造：
+
+1. 收集当前地图可见节点、`covers`、`source_refs` 和关系入口中的 Turn ref；
+2. 加入尚未归类到话题的 Turn；
+3. 加入确定性的近期 Turn 尾部，保证新近但未整理的事实不会消失；
+4. 对 Turn ref 去重后按 Session 的历史提交顺序排列，并在每个 Turn 内按原有 timeline 顺序展开。
+
+地图可见引用不是线性区域的唯一来源；完整历史目录始终覆盖固定 Session 来源集合，不能因为某个 Turn 没出现在当前地图摘要中就丢失。容量充足时线性区域直接呈现多个历史 Turn 的交互正文；容量不足时保留近期内容、地图当前解释直接引用的来源 Turn 和未归类 Turn，其余 Turn 显示折叠入口。选择规则是确定性的，不为每次背景投影调用 LLM。
+
+建议的模型可见布局如下：
+
+```text
+会话地图〔session:map〕
+  话题 A：缓存改造〔thread ref〕
+    当前理解：改用按需清理〔解释；来源 T1/input、T2/append〕
+    covers: T1、T2〔Turn refs〕
+    分支：资源限制〔thread ref〕
+  话题 B：部署约束〔thread ref〕
+    covers: T2、T3〔T2 与 A 共享同一 ref〕
+  未归类交互：T4〔Turn ref〕
+  更多历史：全部 Turn 目录〔session history ref〕
+
+线性交互〔按事实发生顺序〕
+  T1
+    user.input：请设计缓存清理策略。〔input ref〕
+    agent.question：采用哪种策略？选项：[1. 定时清理；2. 按需清理]〔question ref〕
+    user.reply：第二项。〔reply ref〕
+    agent.output：采用按需清理。〔output ref〕
+  T2
+    user.input：继续实现。〔input ref〕
+    agent.reason：已执行一次推理行动。〔action ref〕
+    user.append：还需限制缓存最大占用。〔append ref〕
+    agent.output：已补充容量限制方案。〔output ref〕
+  T3、T4……〔同一历史规则，过长时分页/折叠〕
+```
+
+同一 Turn 多话题归属时，地图各处只保留同一 Turn ref，线性交互区域只展开一次正文；不另存 `primary_topic`，不把正文复制到多个分支。Organize 改变归属后，地图布局和解释可以变化，线性正文的身份、原始顺序和内容不变。未整理的 Turn 进入“未归类交互”范围，不需要先 Organize 才能在 Context 中出现。
+
+稳定 ref 负责身份和关联，线性区域负责时序，地图负责语义。提问、完整有序选项和相关回复是线性投影中的关联单元：不能只留下“第二项”“同意”等脱离问题的回应，也不能省略或重排选项后沿用原选择。容量允许时关联单元的正文一起显示；需要折叠时给出问答线索、来源与完整内容入口。关联单元只影响保留/折叠选择，不重排实际交互顺序，不持久化第二套问答对象。
+
+原始交互完整保存，正常容量内在线性区域直接呈现，超容量后显式折叠。这里的“完整”不承诺任意长度的全日历史永久全部驻留；长正文和较大历史的处理见 §6.3，引用或摘录不会冒充原文全貌。
+
+## 5. Action 契约与当前轮证据
+
+### 5.1 整理动作
+
+保留主计划的单一签名方向：
+
+```text
+core.session.organize(
+    scope_refs,
+    upsert_nodes = [],
+    upsert_edges = [],
+    retract_ids = []
+)
+→ changed_refs + 本次新建 key 到稳定 ref 的映射 + 简短结果
+```
+
+`scope_refs` 表达关注的历史范围，可包含多个历史 Turn、事实或已有语义节点；不是权限声明或必须只处理上一轮的限制。新输入用于解释这些历史对象，不因提供了当前输入就把当前运行轨迹整体加入历史地图。没有可整理历史时返回明确的局部反馈，不制造空线程。
+
+新对象使用本次调用的局部 key 相互引用，由 Session 分配稳定 ref；修订对象使用已有 ref。每个 upsert 给出该对象完整语义字段，不发展通用 JSON Patch 语言，不要求重写整图。对象数量、title/body 与引用数量在工具 schema 中有界；采用能够完成一次实际小批整理的限制，不新增一组复杂治理配置。
+
+模型返回不合法引用、重复/冲突修改或不完整撤回时整批不提交，返回有限结构化原因。语法校验走既有 Action schema，Session 只校验领域约束，不逐层重复同一校验。内部不变量错误不伪装成模型参数错误。
+
+Action 默认串行，复用正常超时、取消和 owner_operations；同批互相依赖新 ref 的多次整理应合为一个请求，或放到后续 Cycle，不在并行执行结果间猜引用。无隐藏 LLM、无新 Job、无专属完成器。
+
+Organize 直接接受 Map/inspect 披露的同一节点与关系引用；模型看到的解释就是可以修订的对象。事实节点只能作为成员或证据被引用，展示预算、分页位置、正文展开位置等派生字段不可写。单次提交既可补一句带来源的解释，也可改变话题成员/分支关系；结果返回同一引用体系的 changed_refs，随后重建同一 Map 的视图，不再维护一份独立的森林编辑结果。
+
+### 5.2 当前事实引用的闭环
+
+当前 `completion.py` 将 `turn:trace@<turn>#input/<input_id>` 映射为 Session 输入 occurrence，将行动映射为 Session Action occurrence。不能把依赖当前 Context 寿命的引用直接当成已持久证据，也不能从模型消息重新解析事实。
+
+建议实现方式：
+
+1. Context 提供当前 Turn 的只读类型化事实入口，复用现有输入身份与 Trace 导出。读取不封闭活动 Turn、不安装更新、不保存另一份运行历史。Action 在事件循环侧取得不可变事实快照后，将它交给 joined Session 操作；文件操作线程不反向读取正在变化的 Context。仅导出本功能确有需要的事实；不把完整 ContextEngine 交给 Session 写服务。
+2. Session 将现有完成投影中的引用映射提炼为共享规则，供 Organize 和完成记录共同使用。Session 解释 Session ref，kernel 不解析它。
+3. Action 接受已披露的当前 input/action ref，从只读事实入口确认输入已经进入当前事实集合、行动已经结算，转成最终对应的 Session 来源 ref。最终 occurrence 基于追加式事实次序，后续输入/行动不能改变既有映射。
+4. 本轮未完成时，来源读取通过同一本轮只读事实入口解析这类已确认引用，并明确来源仍属于活动 Turn；本轮完成后同一引用读取不可变 record。地图的历史 Turn 列表不因此增加一个未完成 Turn。
+5. 不支持引用未来结果、未结算 Job 终态或尚未落入事实入口的排队输入。本轮只需要当前输入与已结算行动作补充证据，不为任意临时压缩节点建立持久身份平台。
+
+现有 `seal_trace` 调用 `TurnTraceHeap.seal` 会把尚未执行的已登记 Action 标为 not_executed，并要求不存在正在执行的 Action；它只适用于收尾，不能充当本轮只读事实入口。运行中读取应沿现有 Trace 事实结构提供窄快照，保留按请求登记的原始 Action occurrence；只筛选可引用事实，不能把已结算子集重新编号。当前输入/行动仅作为补充证据被精确解析，不进入固定 prior-Turn 目录、话题成员或线性交互正文集合。
+
+后续追加输入既可能修正上一轮的假设，也可能改变原有话题关系；允许直接据此整理。取消/失败仍通过既有 completion 记录已经发生的事实。必要记录保存失败时，已提交 map 不声称回滚；来源按实际情况报告不可用，不能制造证据或启动跨文档补偿事务。
+
+## 6. Map 视图、更新和渐进披露
+
+### 6.1 在 Context 中的形态
+
+`session` 仍是 Background 槽位的一个 Map 段，顺序保持 identity → session → inputs → Home/Memory。模型在同一 Session 段中先看到语义地图，再看到线性交互正文；地图使用稳定引用，线性区域按事实顺序提供正文，不把同一 Turn 复制到多个话题。Map 和线性区域都是有界文本/结构化消息，不是磁盘 schema、全图 JSON 或第二份历史账本。
+
+自动投影包括地图入口、话题/分支解释、Turn/事实 refs、未归类入口、完整历史目录入口，以及按 §4.6 选择的线性交互流。目录覆盖完整来源集合，不表示自动枚举全部 child refs。正常容量内多个历史 Turn 的交流原文直接呈现；“有界”由整体容量与真实长内容决定，不意味着只能展示最新一轮。线索来自已提交的 title/body 与原始交互，未整理时仍会进入线性交互区域，压缩器不编造话题。
+
+下面仅示意语义布局，引用简称用于阅读；实际字段和文本沿现有 MessageStack/Disclosure 构造，不固定为提示词快照：
+
+```text
+当日会话地图〔session:map〕
+  话题：缓存改造〔thread ref A〕
+    当前理解：改用按需清理〔解释；来源 T1/input、T2/append〕
+    covers: T1、T2〔Turn refs〕
+    分支：清理策略〔thread ref A1〕
+  话题：资源限制〔thread ref B〕
+    covers: T2、T3〔T2 与 A 共享同一 ref〕
+  未归类交互：T4〔Turn ref〕
+  更多：全部话题 / 未归类历史 / 全部历史交互〔目录 refs〕
+
+线性交互〔按 Session 稳定历史顺序〕
+  T1〔Turn ref〕
+    user.input：请设计缓存清理策略。
+    agent.question：采用哪种策略？选项：[1. 定时清理；2. 按需清理]
+    user.reply：第二项。
+    agent.output：采用按需清理，并在访问时检查过期项。
+  T2〔Turn ref〕
+    user.input：继续实现。
+    agent.reason：已执行一次推理行动。〔action ref〕
+    user.append：还需限制缓存最大占用。
+    agent.output：已补充容量限制方案，尚待验证。
+  T3、T4……〔同一历史规则，过长时分页/折叠〕
+```
+
+示例中的正文位于线性交互区，而不是嵌套在话题节点中。T1 与 T2 都能保留正文，不要求只有最新一轮展开；T1 的选择无需再读一次工具才能理解。地图中的资源 Link、解释和 Turn ref 仍能追溯到同一线性正文。话题森林、未归类区域、线性历史和全部历史目录是同一组对象的访问路径；无话题归属的 note 也须可从注释目录找到，撤回对象仍能按稳定 ref 查看状态。
+
+当前活动 Turn 的 inputs/trace/working 仍使用原有分区，不复制为地图中的已完成 T4。当前输入可成为 Organize 的解释证据，按 §5.2 处理，不能因此提前生成历史交互流。历史问答在 Session 消息内明确标为历史内容，不重新作为新的用户指令或原生工具调用交给模型。
+
+### 6.2 固定事实来源与可更新解释
+
+Session View 拆清两个组成：本轮固定的 prior-Turn 事实来源集合，以及本轮已经安装的注释快照。Organize 只刷新后者，不重新获取扩大后的 manifest 来源集合。SDK 新获取的视图可以看到最新已提交状态；已取得的固定只读视图仍保持自己的快照语义。
+
+User Session 段增加 owner 自有更新类型与 decoder；Action 在提交后向既有 SignalBus 发出更新。prepare 读取最新注释、构造候选视图；install 同步替换。多个刷新通知可在同一批次读最终状态，不增加全局 Session EventSource。Reflection 的目标历史视图仍只读，不注册没有真实用途的更新通道。
+
+加载索引和候选投影只在 open/确有更新时准备；已安装投影供模型调用复用，事实详情按需读取。不得把每个 Cycle 扫描全部 Turn 文件作为更新实现，也不为了避免扫描再持久化一份历史副本。
+
+prepare 同时构造语义地图视图、线性交互候选集合和适合当前预算的正文展开集合，render 只读取已安装候选。背景与 inspect 共享节点、交互角色、正文来源和关系投影；地图只消费引用，线性区域消费同一 Turn 交互流，不出现背景展示旧解释、inspect 却无提示地改读另一份最新解释的情况。
+
+容量允许时在线性交互区域直接展示全部已选历史 Turn 的交互流。候选集合按 §4.6 从地图引用、未归类 Turn 和近期尾部合并，再去重并按稳定历史顺序排列；容量不足时按近期交互、当前解释直接引用的来源 Turn 和未归类 Turn 等确定性依据选择展开对象，具体顺序和限额在实现中固定，不为每次投影调用排序 LLM。较早 Turn 若是当前可见解释的直接依据，同样进入正文候选；不能硬编码“只有最后一轮可展开”。全部 Turn 仍由历史目录覆盖，Organize 本身不会让某 Turn 因“已经总结”就失去正文候选资格。
+
+### 6.3 压缩只缩小自动投影
+
+Session 的背景容量与单次 inspect 容量是两个既有设置，分别控制持续入模的概览和一次读取的反馈。Session 仅在自身达到水位且收到回收请求时缩减；不能因为别的段大，就任意逐出未达水位的会话地图。
+
+地图导航与线性交互正文共同计入同一个 session 背景预算，不能各用一份完整预算。地图中的解释正文、关系和 child refs 也须有界：内容增长时沿已准备的话题/注释/事实目录折叠并保留入口，不能要求所有地图引用永久同时入模。无需新增独立地图配额配置或第二套回收器。
+
+open/更新时先构造有界语义地图，再从去重后的 Turn ref 集合计算线性交互正文是否可完整容纳；能容纳就直接呈现，不先套旧的每条 ask/answer 字符截断。只有真实超出预算才选取、折叠或标明长文本摘录。压力回收沿用同一投影规则与更小的可用预算，只在内存中收起已准备的地图详情和线性正文，不执行文件读取、补选未准备的分支或扩张展开范围；地图根和历史入口保持存在，已披露引用仍可解析，不另写一套“压缩版地图”。
+
+缩减优先减少附带的普通 Action 细节和过长线性交互正文，再按上述优先级收起较低优先的 Turn。保留交互时遵循 §4.6 的问题、选项、回复关联规则；通常以完整 Turn 交互流为选择单位，不能仅从 inputs 尾部截取几条回复而丢掉其问题或初始约束。收起一个 Turn 时在线性区域给出已有语义线索或明确标为摘录的事实预览、折叠状态与 ref，地图不复制其正文，不生成未保存的新结论。需要大幅回收时沿已有话题/事实目录保留入口。
+
+若单个 Turn 的正文已经超过预算，可先保留其交互角色、实际顺序与各项引用，对超长消息给明确标记的正文摘录；短问题、选项和回复在可容纳时完整保留。某个问答关联单元本身也过长时整体折叠为可展开入口，不能把问题选项省略后孤立展示“同意/第二项”。模型能区分“原文已展示”“仅摘录”“已折叠”，需要精确信息时沿 ref 读取完整分页。未展示内容始终保留原始来源，不以摘录承诺语义完全无损。
+
+```text
+容量充足：话题/分支 + 解释/来源 + 多轮交互正文与选项 + 未归类交互 + 目录
+容量收紧：部分完整交互正文 + 已折叠 Turn/分支线索 + 同一引用入口
+最低投影：地图概览 + 话题/注释目录入口 + 历史事实目录入口
+```
+
+这些是地图与线性交互区域展开程度的变化，不新增三档业务状态机，也不承诺无限历史永久常驻。最低投影仍能进入事实和注释两类内容，若连它也放不下则沿既有容量失败处理。回收不改 map.json、不删除事实或注释、不隐式执行 Organize、不调用 LLM 重写摘要。地图分组线索来自现有标题、日期/Turn 范围和已保存语义；线性区域只按事实顺序呈现既有 Turn，不因分组重新组织而偷换成员或正文。已有事实分组继续由本轮固定来源集合确定；如需要新增展示分组，旧分组在本轮仍可解析，不持久化无限展示版本。
+
+Agent 通过 Organize 把若干 Turn 的意义凝练为有来源解释，形成后续可用的短线索；压力回收则利用已有线索收起细节。前者改变理解内容，后者改变展开程度，共享节点与来源，但拥有不同提交边界。未执行 Organize 的会话仍可确定性折叠与读取，整理不是容量恢复的前置。
+
+同一 Turn 中的 Organize 刷新沿用已经收紧的展示预算；不能每次刷新恢复完整背景而反复抵消回收。下一 Turn 可按自己的初始预算重建投影。这只是本轮视图状态，不形成新的持久压缩历史。
+
+### 6.4 inspect 是当前交互中的按需读取
+
+`core.context.inspect` 使用同一入口按 ref 逐层读取：
+
+| 目标 | 返回的语义 |
+|---|---|
+| 地图/目录 | 话题、注释或历史分组的标题、短线索与 child refs |
+| 话题/注释 | 当前解释、事实/推导标识、直接关联关系及来源 refs |
+| Turn | 同一事实交互流：初始输入、追加、reason 行动、问题/选项/回复及正式输出；长内容分页，另给其它 Action/timeline 等入口 |
+| 行动集合 | 行动线索、结果状态与具体 occurrence refs |
+| 输入/行动等事实叶子 | 原始输入或规范行动请求、已知结果/中断事实；长内容继续分页 |
+
+一次导航披露该节点的正文与直接入口，不沿所有关系自动递归展开整图；图中合理回路通过引用表达，不触发无限遍历。Turn inspect 本身可以分页读全交流正文，不迫使模型为每条短输入、选项和回复分别调用工具。所有历史 Turn 使用同一规则；某个事实 ref 也可直接读取，不要求先按话题逐级寻找。
+
+Background 线性交互区域与 Turn inspect 来自同一交互投影，不各自猜测 question/reply 或生成摘要。单次 inspect 有自己的预算，返回正文、顺序与后续分页；长问答跨页时保留问题/reply_to 身份和未完状态，不将只读到的一页描述为完整问答。地图/话题 inspect 只给 Turn 内容线索和入口，不强制递归载入成员正文；模型已在 Background 线性区域看到的正文不因地图重复展开。
+
+query 继续做指定范围内的确定性文本定位：地图范围覆盖该视图的事实与注释，Turn 范围覆盖该 Turn 事实；语义节点范围以该节点内容与明确列出的直接事实来源为界，不默认沿任意横向关系搜索整图。结果给出事实/解释类型、命中短摘和原 ref，再由 inspect 精确读取；不增加检索 LLM。
+
+inspect 结果作为本次 Action 的反馈进入当前 Trace，不永久展开 Background 的 session 段，也不改 map。完整可见结果至少进入一次实际返回的决策模型请求后才允许被 Trace 回收；以后仍可沿原 ref 再读。归档视图复用同一读取实现，保留原日资源身份。
+
+### 6.5 分页、下探与视图变化
+
+| 操作 | 改变什么 | 不改变什么 |
+|---|---|---|
+| Background 压缩 | 收起地图详情及线性交互正文的部分 Turn/长内容 | 源事实、注释、地图入口、inspect 内容和原 ref |
+| 沿 child ref 下探 | 正在读取的语义对象/层级 | 其余对象和持久地图 |
+| 同 ref + continuation 翻页 | 同一次读取范围内的返回位置 | 对象/层级、内容含义和持久地图 |
+| Organize | 已提交的语义节点/关系；随后刷新投影 | 原始 Turn 事实和本轮历史来源集合 |
+
+一个目录有很多 child、一个节点有很多关系/来源、或者一段事实正文很长，都可以产生多页；分页与处于目录还是叶子无关。调用者继续传相同 ref/query 和返回的 `next_continuation`，直到不再有下一页。已有公共披露页负责完整 item 与过长 item 的续读，不以静默截断冒充完整正文。
+
+Q2 已确认复用 `DisclosurePage` 与 `OpaqueContinuationCodec` 已有的 ref/query/内容视图绑定。若 Organize 改变了该次读取的目录顺序、解释正文、关系或查询结果，旧 token 返回明确局部失效，从原 ref 重新读取；不因不相关节点更新而额外引入整图全局版本来让所有页失效。单纯背景压缩不改变完整 inspect 视图，因此不使 token 失效。
+
+不可变事实正文及确定性线性历史页不混入可变解释正文；地图只引用 Turn，不把可变话题标签写进事实正文页，避免一边承诺事实分页稳定、一边因注释变化改变同一页。地图组合页按实际语义内容变化处理，线性事实页按固定来源集合处理，不以 ref 名字是否含 Turn 判断稳定性。
+
+无需保留旧图多版本、建立反向依赖失效系统或增加模型可见 revision/CAS；只有 owner 内部的读取一致性校验。稳定 ref 表示对象身份，continuation 表示特定内容的一次续读位置，两者寿命不同。语义 ref 被撤回后仍可读到撤回状态；旧正文的续读位置不能自动套到新正文上。
+
+### 6.6 同一语义对象贯通展示、整理与读取
+
+四种操作共用 Session 的对象身份、交互角色、正文来源、话题结构和披露线索，分别承担以下职责：
+
+| 操作 | 对同一 Map 的作用 | 持久变更 |
+|---|---|---|
+| Background 呈现 | 组合地图导航和一次去重的线性交互正文 | 无 |
+| Context 压缩 | 收起地图详情与线性 Turn/正文细节，保留地图和历史入口 | 无 |
+| core.context.inspect | 读取地图、线性历史或具体 Turn 的详情、关系与来源，按读取范围分页 | 无 |
+| core.session.organize | 修改解释节点/关系，包括话题结构；通知同一段刷新 | 仅语义解释 |
+
+公共披露语义包括 ref、种类/事实或解释标识、标题/线索、正文、成员/关联和来源。复用现有 DisclosureHint/Page，不增加万能图模型或统一可写 DTO：事实只读、解释可写、展示位置和分页是派生状态。Kernel 继续只知段生命周期、容量能力与 ref 路由；Session 负责每个对象的具体含义。
+
+Background 在线性区域展示正文与 inspect 取回正文并不矛盾。前者是自动语境，后者服务明确的一次读取；inspect 输出留在 Trace 并遵守消费后回收规则，不自动向 Background 添加永久展开集合。地图与线性区域仍是同一 Session 段的两种投影，不新增 focus/pin/expand 控制动作，也不以 Organize 代替显示控制。
+
+## 7. 失败与取消
+
+| 情况 | 归属与行为 |
+|---|---|
+| 无效引用、未来证据、冲突 upsert、不完整撤回 | Session 局部整理结果 → Action failure，整批不写，后续 Cycle 可修正 |
+| inspect 未知 ref、语义分页 token 失效 | 既有 Context inspect 局部失败；回到入口重新读取 |
+| 持久 map 损坏、原子写 IO、内部不变量失败 | Session 模块异常 → RuntimeSessionBridge；不暴露原始异常/路径/正文 |
+| 写成功，后续视图准备失败 | 保留已提交事实，沿现有准备失败边界处理；可重读视图，不重放整个 Action |
+| 操作期间取消 | 复用 joined owner，结清已进入的本地操作后取消；不伪称已撤销原子提交 |
+| Turn 记录必要提交失败或后续 close 失败 | 复用既有必要提交/清理诊断区分，不重写事实、不新增恢复状态机 |
+
+以上保护真实持久化和正常取消边界，不扩展为崩溃续跑、WAL、跨文件原子事务或注释自动修复平台。现有 Runtime bridge 能表达的失败不另造 Trap 原因。处理局部错误时使用稳定有限原因与短摘要，完整异常只留调试链。
+
+## 8. 注册、配置和代码组织
+
+- catalog 新增 `tinysoul/assets/common/configs/action/catalog/core/actions/session_organize.toml`，原有 ConfigDocumentSet/init/include/action override 全部复用；domain 默认选择可被 action 覆盖。
+- action 属于 core 规划域，执行器属于 Session 插件。User profile 默认可见；Reflection 默认不可写，不因用户只改 visibility 就获得缺失的写服务。不要为它新建 session domain 或 reflection domain。
+- 已确认保留 SDK 的 `SessionService` 只读能力，另有只注入 User profile 的窄整理门面，与同一 SessionEngine 协作。两者按读/写实际权限区分，不各自持有一套地图状态；写门面不提供 record_turn/日切/任意文件操作，也不新增外部 HTTP 整理写入口。
+- `plugins/session/records` 继续只管不可变事实；`views` 管同一地图的投影与披露；语义类型、存取、变更操作按真实职责放进 `annotations`；Action 薄适配留在 Session 内。现有 `engine/services/plugin/projection/completion` 承接公共装配，不按概念机械新建每种文件或大基类。
+- 收敛 `project_turn_background` 与 `project_navigation_header` 等路径中的重复问答提取：在 Session 内复用类型化交互投影、节点线索和关系读取，分别用于 Map 导航、线性交互区和 DisclosurePage 分页。移除已被统一交互流替代的尾部 ask 拼接和固定先截断规则，不保留两套事实展示解释。临时候选集合/索引可缓存，正文权威仍是唯一 Turn record。
+- Context 只读事实协议跟随现有 Context 模块；Session 引用映射在 Session 内共用。新增方法都必须有 R7 的真实消费者，不建立通用图插件 SPI。
+- 默认不增加第三方依赖。Session 整理不需要新模型链；Phase2 和 Skill 挂载继续走已有 Action 体系。
+
+## 9. S7 架构与文档收口
+
+### 9.1 收口内容
+
+逐项建立主计划验收点到实现、文档和测试的映射，而不是只搜索旧名字后批量替换：
+
+1. **规约单一语义。** 按实际实现重写 AGENTS 的稳定定义和模块职责，将过渡条款融入正文：Agent/CalendarDay/Reflection、Turn-owned Job、三分区 Context、域与情景、Workspace 无 CAS、单文档 Memory 写入、Signal/Observation/Trap 分工。历轮统计和迁移过程留在已有归档计划，规约不继续累积互相覆盖的当前状态。
+2. **公共接口与依赖。** 核对 SDK 导出、scoped services、插件注入、owner bridge、Action/Context/Job/环境与完成管线只有一个主实现；删除发现的兼容入口、死字段和无消费者方法。跨插件协作继续通过公开门面，不能为简化调用把 Engine 私有存储交给上层。
+3. **模型语义与配置。** 核对实际 MessageStack、Action catalog、profile 提示与结果投影。内部 revision/digest/schema 等字段逐项检查消费者，只移除没有用途的模型暴露；不机械删除分页、存储或真实 SDK 消费者需要的内部事实。配置文档、可见性和实例权限必须可相互解释。
+4. **主线与生命周期。** 核对正常对话/追加/追问、等待/取消/预算、文件变化、Job、Reflection、跨日与 restart；必要完成先于归档/释放，附属诊断不覆盖主结果。R6 的 Workspace 同步回归保留证据；未复现 IO 根因不能写成已经解决，不凭假设增加重试框架。
+5. **文档与交付。** 同步 `docs/design/{session,context,agent,action,reflection}.md` 及受影响模块、README 的 SDK/部署说明、Endpoint 受影响字段说明、资源预设和生成/wheel 验收。现有接口无变化的文档无需机械改动；`visualization` 产品代码不在本轮实施范围。
+
+主计划只补进度、证据链接和有代码依据的过时名称/现状说明，不重写目标与 S 编号。尤其区分历史记录中“当时待做”与正文里仍声称“当前待做”，避免修改历史统计来伪造一致性。
+
+### 9.2 功能规划的接续方式与本轮边界
+
+`00 doing something.md` 中的未来能力按现有体系接入：资源格式/图像由 Workspace 资源身份和局部 Action 处理；持久收藏若未来建立独立生命周期，应有明确 owner；coding 等复杂能力组合 execution/subagent/Workspace 与 Skill；外部工具沿 expand，前端语义图沿只读 owner 投影。它们不要求本轮再加一套通用编排。
+
+本轮不建设跨日语义地图、Memory 自动归纳、强制逐 Turn 整理、内部 sub-Turn 配额、长期跨 Turn Job、专属图编辑 HTTP API、前端图可视化、library 新 owner、多模态新协议或部署自动更新。若核对发现某项是当前主线的实际缺口，先给出具体证据和范围调整再讨论。
+
+## 10. 实施顺序与验收
+
+| 切片 | 状态 | 交付与验证 |
+|---|---|---|
+| R7-0 方案定稿 | `done` | schema 小批边界、User 读写授权与共用投影已落定，Q1–Q8 无方向变更 |
+| R7-1 注释 owner 与证据 | `done` | annotations 单文档原子替换，current_facts 纯读取与共享 occurrence 转换；重开/撤回/失败验证见 §13.1 |
+| R7-2 Action 与统一地图视图 | `done` | core 注册、Signal/prepare/install、共享交互正文、导航/query/分页与同一预算均已实现并聚焦验证 |
+| R7-3 跨 Turn/日/情景闭环 | `done` | 真实 Agent 主线覆盖下一 Cycle、restart、归档/空新日、User 写与 SDK/Reflection 只读 |
+| R7-4 S7 一致性清理 | `done` | AGENTS/设计/预设/README 已同步；主计划 19 项证据映射、导入与发布门禁通过 |
+| R7-5 最终核验与归档 | `done` | Fast/Full、Windows/Linux 目标 typecheck 通过；限制和部署说明已记录，主/子计划完成归档 |
+
+必要验收集中于真实契约：
+
+- 多个历史 Turn 创建同一话题 → 分支/汇合 → 用户更正后修订/撤回；原始失败/取消事实保持不变。
+- 在预算充足、至少三个已完成 Turn 的实际 MessageStack 中验证地图只呈现话题/关系/Turn refs，线性交互区域按稳定顺序呈现初始输入、追加、问题及完整选项、回复与最终回答原文；包含较早 Turn 与尚未整理的 Turn，不只断言 ref 可读或最新问答可见。
+- 连续追问、多次 reply/append 与 reason/其它行动交错时角色和顺序正确；“第二项/同意”等回应保有对应问题与选项，普通 append 不误配为 reply。question/reply 的事实规则不依赖 Organize；转向/因果关系仍标明为解释。
+- reason 的行动标记、状态和引用可见；不把自定义 JSON 假设为统一结论，也不自动暴露 CoT 或供应商隐藏 reasoning。正式 output 只展示一次，失败/取消不把候选回答冒充已交付回答。
+- 一个 Turn 同时属于多个话题时共享同一事实 ref，地图各处只保留引用，线性交互区域只展开一次正文；未归类 Turn 在纳入话题前后都出现在同一历史顺序中，身份与内容不变，展示位置不成为新的主要话题状态。分支合流新增解释入口并保留旧 thread/Turn。
+- 新旧对象同批引用和原子提交；一次非法修改或写失败不产生半图。一次 Organize 不发生额外 LLM 调用。
+- 当前输入、行动证据提交时可解析，完成后保持同一来源；运行中读取不 seal、不改变其它 Action 状态，追加或并行结算不改变已经确认的 occurrence；未知/尚未发生的引用被局部拒绝，活动事实不被纳入 prior-Turn 目录或线性交互正文。
+- 整理前后实际 MessageStack 的 session 投影更新；同批其它段 prepare 失败不提前安装，不重放已写 map。
+- 根导航、语义关系、范围 query、分页、撤回节点解释和压力后的再次取回；旧语义 token 按确认契约处理，既有事实 ref 保持可读。
+- 背景压缩不影响既有分页；无关注释更新不使未变页面失效；事实正文分页与可变语义关联分开。刷新沿用已收紧的展示预算，inspect 反馈不暗中常驻 Background。
+- 容量充足时不沿用固定尾部输入/单条字符限额而提前丢正文；容量不足时按同一投影规则折叠并明确标记，问题/选项/回复不被错误拆散。覆盖一个超长 Turn 与多轮整体超限，较早来源 Turn 有正常展开机会，最低入口仍可取回全部原文。
+- 地图解释/关系较多而 Turn 正文较少时，整体投影仍遵守同一个 session 预算；可折叠地图详情，所有已披露 ref 仍可读取，不靠枚举全图维持可达性。
+- 压缩后以原 Turn ref 分页读取完整交互流，与 Background 线性交互区域展示的角色、原文、选项顺序和来源一致；地图页不携带正文，不能要求通过地图展开来代替历史读取。不用逐条 inspect 才能读齐普通短问答，也不因只读到一页就宣称长正文完整。
+- User 可整理、Reflection 和 SDK 读取不获得隐含写权限；开关 action 不改事实 owner。
+- 同日重开保留地图，必要 Session 提交失败如实报告来源，日切 map/turns 一起归档，新日不继承；旧世代/日服务按已有规则失效。
+
+Session owner 完整覆盖自己的契约；跨模块只补实际协作缺口，复用现有 SDK 生命周期、真实文件/进程、ACP/MCP 本地协议 fixture 和 Gateway 测试，不复制全套历史测试或固定可编辑提示文案。代表性 E2E 可使用可控 LLM/provider，但必须经过真实 Agent/Action/Context/Session 主线；不以直接调用 executor 代替协作验收。
+
+代码迭代运行 Fast；声明实施完成前在 TinySoul 环境运行：
+
+```powershell
+conda activate TinySoul
+.\scripts\test.ps1 -Suite Full
+.\scripts\typecheck.ps1
+python -m ty check --python (Get-Command python).Source --python-platform linux
+git diff --check
+```
+
+Full 已包含 Generation/wheel。核对基础导入图、安装包/默认项目启动、禁用外部能力时的导入路径，以及代表性对话/整理/归档协作；已有测试覆盖充分时不重复扩建矩阵。遇到执行策略限制按 AGENTS 使用 Bypass 启动脚本，不把策略错误统计为 pytest 失败。
+
+真实模型委派、远程 MCP、搜索质量和 Linux 实机验证与本地门禁分别记录，不以目标 typecheck 代替实机结论；它们不自动扩大 R7 功能范围，也不能借历史 smoke 宣称均已验证。
+
+R7-1–R7-3 与文档/验证一致后才将 S3 标 done；R7-4–R7-5 和主计划全部验收点核对后才将 S7 标 done。仍有必要缺口则如实保留未完成。完成的子计划按规约加 `-done-` 移入 `docs/analysis/done/`；主计划整体确已完成时同样归档并同步活动引用，不仅因为轮次到七就归档。
+
+## 11. 确认状态与剩余设计取舍
+
+| 编号 | 建议 | 取舍 |
+|---|---|---|
+| Q1 `confirmed` | R7 同时承接 S3 Organize 尾项与 S7 最终收口，分两部分验收 | 维护者已确认；本轮目标是完整主重构收口 |
+| Q2 `confirmed` | 按 §6 进行有界地图投影、owner 水位回收和渐进读取；分页复用实际读取内容绑定，内容变化才明确失效 | 维护者已确认；背景压缩不影响分页；事实正文页与可变语义关联分开；不保存旧图版本，节点 ref 稳定 |
+| Q3 `confirmed` | User Turn 内经 Action 整理；本轮 SDK SessionService 保持只读，也不新增 HTTP 整理写入口 | 维护者已确认；保持 Agent 自主理解对话的写路径 |
+| Q4 `confirmed` | Map 采用“事实历史列表 + 有来源语义解释 + 话题森林导航投影”；底层保留可共享事实和横向关系，允许一个 Turn 属于多个话题 | 维护者已确认；relation enum 在 R7-0 按 §4.4 落定，精确字段属于实现细化 |
+| Q5 `confirmed` | 关系整理与结构重塑共用 `core.session.organize`，由同一批 upsert/retract 原子提交；不另造 `link`、`topic` 或自动摘要 Action | 维护者已确认；保持 Action 面向模型的单一入口，结构变化只更新解释和导航 |
+| Q6 `confirmed` | 分支汇合创建新的解释入口，引用多个旧 thread/Turn；旧分支保留，避免移动历史 ref 或强行选择唯一父节点 | 维护者已确认；森林是导航投影，不承诺底层图永远是严格树 |
+| Q7 `confirmed` | 两类持久内容与同一披露视图；话题组织属于语义解释，Background/Organize/压缩/inspect 共用节点、引用与投影语义 | 维护者已确认上一轮分析；§4.3、§5.1、§6.6 已落实，不引入独立森林 owner |
+| Q8 `confirmed` | 同一 Session 段采用“语义地图导航 + 线性交互正文”：地图只保留话题/关系/Turn refs，正文按稳定历史顺序一次呈现；未归类 Turn 不遗漏，超容量按 Turn/问答关联单元折叠 | 维护者已确认采用该方案；设计见 §4.5–4.6、§6.1–6.6，实际落点及验证见 §13 |
+
+Q1–Q8 均已确认。Q8 不表示任意长度历史永久全部入模，也不引入平行线性 Summary；线性交互区域只是从同一事实图派生的稳定时序投影。R7-0 继续落实具体类型、Action schema、来源校验、候选选择/去重/排序规则和文件职责；不额外扩张业务协议。当前轮证据转换、视图刷新和读写服务隔离须用协作测试证明，不能以第二套历史存储绕过。
+
+## 12. 方案核对结论
+
+R7 方案与主计划、AGENTS.md 和已有实现保持同一套抽象：Session 是事实与持续会话理解的 owner，Context 只组合当前 Turn 的视图，Action 是唯一模型写入口，Signal 只通知视图刷新，completion 仍是历史事实的唯一提交边界。两类内容由同一 Session 段披露；话题结构归解释维护，地图只承担语义导航，线性交互区只投影同一事实图的时序正文，没有独立树或平行账本。
+
+地图引用和线性交互正文使用户原话、问题选项、回复和结论既保持时序，又能从话题关系追溯证据；正常对话不必为每条短内容重复 inspect。共享投影把 Background、压缩和 inspect 统一到相同事实，Organize 只改有来源的理解。多轮正文默认可在线性区域展开与整体容量上限同时成立；具体折叠不会改写原文或关系，未整理历史仍可直接使用。
+
+正常数据流、所有权和结束边界已经明确，未发现必须暂停设计的语义冲突。边界失败继续按 Action 局部结果、Session 模块异常、Runtime bridge 三层处理；不增加图数据库、隐藏 LLM、第二套整理 Loop、外部 HTTP 编辑器、跨日地图或无限版本链。
+
+R7 按本计划完成意味着补齐 S3 并验收 S7；结合已完成的 S1/S2/S4/S5/S6，主执行计划所定义的本次架构重构即可完成。最终依据是主计划 §13 的全部验收点、实际实现、文档与必要门禁，不能只根据子任务勾选推定。`00 doing something.md` 的开放能力设想，以及主计划明确延后的内部子 Turn 等能力，保留为后续产品演进；真实外部模型/远端服务/Linux 实机的验证边界单独记录，不把本地架构验收扩大为所有部署条件均已验证。
+
+### 12.1 实施准备复核（历史记录）
+
+状态：`pending`，准备实施；本次是设计与代码接点的静态核对，不是 R7 实施验收。已重读 AGENTS 正文及过渡条款、主计划、功能规划和本子计划；没有新增需维护者决定的产品语义，也不把具体类型命名、schema 限额或文件拆分重复列为审批项。
+
+| 核对项 | 当前代码依据 | 实施判断 |
+|---|---|---|
+| 事实身份与交互正文 | `completion.py` 从 typed Trace 映射 input/action occurrence；Turn record 保留原文、reply_to、result_id 与 timeline | 足以建立共享交互投影，预计无需为正文呈现改动 v10 record；先移除 background/navigation 各自截取尾部问答的重复路径 |
+| 当前轮证据 | `TurnTraceHeap.seal` 有收尾副作用；Action occurrence 来自登记顺序 | 增加实际消费的只读事实快照，共用完成引用转换，禁止封存或对结算子集重新编号；按 §5.2 验证 |
+| 注释写入与刷新 | SessionEngine 已有 RLock/原子文件边界，Action 具有 joined owner 操作；Memory Action 已使用提交后 Signal，Context 已有全批 prepare/install | 新写门面与 SessionEngine 共用状态；运行边界安装固定历史来源与新注释快照；不扩充 Runtime 状态机 |
+| 内容分页 | `DisclosurePage.render` 已按实际 items 绑定内容；SessionView 绑定日、固定 manifest 来源与 query | 复用现有 codec，不另加整图注释 revision；同一读取内容不变则 continuation 有效，Background 折叠不改变 inspect 内容 |
+| 同一预算与披露 | SessionSettings 已有 background/inspect 两个容量；SessionSegment 具有同步 reclaim | 地图和线性区域合计预算，prepare 生成可收缩候选，render/reclaim 无 I/O；最低目录入口覆盖未展示事实和解释 |
+| 失败与权限 | Session 模块异常/RuntimeSessionBridge、Context inspect 局部失败、profile 注册和 SDK scoped service 已存在 | 无效整理返回 typed 局部结果，存储/不变量由 bridge 收束；User 写、Reflection/SDK 读，不新增 HTTP 写入口 |
+
+本段是实施前的历史准备记录，曾只收紧容量、引用与来源修订的计划表述；实际实施、验收和当前状态以第 13 节为准。AGENTS 正文中的旧顺序、旧 Job/Memory 等表述依过渡条款解释，不能把旧正文当作保留重复实现的依据。
+
+本段是实施前的历史记录；本轮实际代码、文档和门禁结果见第 13 节与 §13.4。R6 历史门禁不作为本轮验证证据。
+
+## 13. 实施结果与最终核对
+
+### 13.1 实际落点
+
+| 契约 | 实现与验证 |
+|---|---|
+| 事实与解释分开、整批原子修改 | `plugins/session/annotations/{models,store}.py`、`SessionEngine.organize`；`test_organize.py` 覆盖多话题、分支/合流、撤回、重开、非法引用和写失败不产生半图。record v10/manifest v3 不变，新增可选 map.json |
+| 活动证据身份与无副作用读取 | `ContextEngine.current_facts` / `TurnTraceHeap.actions`，`completion.py` 共享 input/action occurrence 转换；并行请求中只允许已结算来源，不 seal、不重排；取消后完成记录仍解析同一 ref |
+| 唯一模型写入口与投影更新 | `session/actions.py`、`services.py`、`plugin.py`、`agent/user/builder.py`；User 专属窄写服务在 owner 提交后发 Signal，段 prepare/install 只刷新注释，固定 prior-Turn 集合不扩张；SDK 和 Reflection 不取得写权限 |
+| 地图引用与时序正文一次呈现 | `views/interaction.py` 共用 typed 交互流，`navigation.py` 提供解释与关系，`inspection.py`/`background.py` 分别消费；移除旧尾部问答摘要/导航提取。三轮实际 MessageStack 验证原话、reason 标记、多次问题/选项/追加/回复和正式输出；多话题不复制正文，未归类可见 |
+| 有界导航、压缩与读取 | Session 总预算内组合地图与正文，近期三轮→解释来源→未归类→其余历史的确定性优先级；按历史次序输出。超限才摘录/折叠，问题选项不截断成孤立回复；自身 80% 水位回收到半预算，刷新沿用缩减预算，render/reclaim 无 I/O |
+| query/分页统一 | 共用 DisclosurePage/continuation，语义目录与稳定事实页分开；查询单个解释只涵盖其正文和直接事实来源。测试确认背景折叠、无关注释修订不使未变页面失效，自身读取内容变化使旧页明确失效 |
+| 主运行与日生命周期 | `tests/agent/test_sdk.py::test_session_organize_updates_next_cycle_and_survives_restart_until_day_switch` 经真实 Agent/Phase/Action/Context/Session、可控 LLM 验证下一 Cycle 更新与 inspect、无额外 LLM、重启保留、归档旧图和新日空图；已有 active_day/旧服务失效/必要收尾契约复用 |
+| 规约与模型信息 | AGENTS 过渡条款融入当前正文；同步 session/context/agent/action/reflection/memory 等设计、README 与 Home 预设。Memory recall 移除无模型消费者的 digest，内部读取/检索摘要保持；新增 schema 长度约束由通用 Action 校验消费 |
+
+没有新增第三方依赖、隐藏模型任务、平行历史、图数据库、跨 Turn Job 或 HTTP 编辑接口。没有改变 Endpoint 协议；现有 `/v2` 与 SDK 的会话读取边界继续成立，故未机械改动 Endpoint 文档和前端代码。
+
+### 13.2 主计划 §13 的逐项验收映射
+
+下表沿用同一运行实现及既有行为测试；R7 只为新契约补测试。测试路径均相对于仓库根，主计划序号保持不变。
+
+| 序号 | 所有权与实现落点 | 验证依据 |
+|---|---|---|
+| 1 | Agent EventRouter、Environment 来源、TurnInbox | `tests/agent/lifecycle/test_sources.py`、`tests/agent/test_sdk.py` 文件变更恢复/世代切换 |
+| 2 | kernel/jobs 监督和 Loop 统一等待 | `tests/kernel/jobs/test_registry.py` 等待前后终态与待答唤醒 |
+| 3 | Inbox 受理、关键容量和独立控制 | `tests/kernel/loop/interaction/test_inbox.py` 进度、reply、终态预留与固定批次 |
+| 4 | Loop 预算与 suspend/wait | 同一 Inbox 测试及 SDK budget/reply 路径：事件就绪与预算共同满足 |
+| 5 | Context 段批次 prepare/install | `tests/kernel/context/segments/test_segments.py` 全批准备、取消、不可重放安装缺陷；R7 Session 候选未安装前不可见 |
+| 6 | Context/TurnCompletionPipeline/Session | 同一段测试、`tests/kernel/loop/test_turn.py`、Session 幂等/reconcile 测试；注释损坏为边界失败，不当作可重建事实索引 |
+| 7 | Trace 事实时间线与 Session 共用交互流 | `tests/kernel/context/test_engine.py`、`tests/plugins/session/test_organize.py`、SDK ask/reply；压缩保留原 ref/配对 |
+| 8 | 情景服务 grants 与 Home/Memory owner | `tests/plugins/reflection/test_action_views.py`、Home/Memory owner 测试与 SDK Reflection；User 无持久专属写权，Organize 不写 Home/Memory |
+| 9 | agent/lifecycle active_day、Archive 和 owner 投影 | SDK 进程跨午夜/必要收尾/旧服务失效，Session 历史资源来源；R7 map 随同一根归档 |
+| 10 | JoinedOperations、infra/process 与 backend | `tests/infra/test_concurrency.py`、SDK 本地写取消/关闭、execution/backend 测试；不把取消解释为回滚副作用 |
+| 11 | Turn-owned Job 与受控 execution/ACP | Job registry、`tests/plugins/execution/test_engine.py`、`tests/plugins/capabilities/subagent/test_engine.py` |
+| 12 | ACP/MCP SDK 适配及插件结果边界 | 本地 ACP fixture、`tests/plugins/capabilities/expand/{test_engine,test_actions,test_directory}.py`；涵盖 stdio/HTTP、权限/结果、schema/分页和未知写结果 |
+| 13 | runtime/kernel/插件单向依赖和显式 SPI | `tests/test_architecture.py` 分层 AST 检查、全包独立进程 import 与 Kernel/Reflection 边界；新 Context facts/写门面均有真实消费者 |
+| 14 | Agent 类型化结果、Endpoint 观察旁路 | SDK/v2 共用测试、`tests/gateway/endpoint/test_endpoint_api.py` 与 event journal/replay |
+| 15 | Reflection 使用同一 TurnProfile/完成意图 | SDK Memory daily 修订、Home 跨 Cycle review，`tests/plugins/reflection/test_turn_boundaries.py` 与 action views |
+| 16 | ACP 连接现态、独立 Job、Turn/日 session 边界 | subagent 本地协议测试与 SDK 跨日/取消；保留 R6 真正外部 smoke 的独立历史记录 |
+| 17 | PluginDeclaration、SegmentDescriptor/registry/composer | 段契约测试与架构测试；R7 只注册 Session 更新类型和 handler，无 composer owner 分支 |
+| 18 | Trace/Session 共用披露协议、可见结果消费保护 | `tests/kernel/context/{test_disclosure,test_engine}.py` 与 Session 根目录/事实/语义分页测试；无 query 亦可达全部事实 |
+| 19 | Session 水位、统一预算、Organize、日归档 | Session 自身水位与新 `test_organize.py`、SDK 整理/重启/日切 E2E；新日空图 |
+
+### 13.3 验证与部署边界
+
+初始 R7 本地门禁：Fast `1139 passed, 28 deselected`、Full `1144 passed, 23 deselected`，包含全部 5 项项目生成/wheel 发布验收、独立进程导入图、SDK/CLI/v2 协作与本地 ACP/MCP fixture。`scripts/typecheck.ps1` 和 Linux 目标 `ty check` 均通过；变更 Python 的未使用导入检查通过。Fast/Full 隔离运行标识分别为 `9f7e4ca179354446b918383472ce7d26` / `cdf570d2580b4cea8a553b0a623deb0d`。连续追问/追加/回复的补充验证也已进入该次 Full。提交后复核发现的披露与查询遗漏及其收口证据单独记录于 §13.4。
+
+主/子计划已按规约加入 `-done-` 并移至同一归档目录，历轮上位计划链接同步修正；README、AGENTS 与 design/endpoint/analysis 共 99 份 Markdown 的本地链接目标检查无缺失，`git diff --check` 通过。
+
+测试使用 TinySoul 环境的 `C:\Anaconda3\envs\TinySoul\python.exe` 与仓库脚本（`TINYSOUL_PYTHON`），因当前宿主 `conda activate` 访问用户配置受限而显式选取已安装环境。聚焦验证覆盖 Session/Action schema/Loop/SDK；早期 Fast 的失败来自旧测试装配未声明新动作支持边界及旧问答字段断言，已按新稳定契约修正，未添加兼容别名或跳过测试。
+
+既有 R6 部署数据无需 reset 或格式迁移；无 map.json 表示无解释，损坏 map 不静默覆盖。既有项目需要显式加入新 `core/actions/session_organize.toml` catalog 文档，路径和初始化来源见 README；不自动覆盖用户配置/Home，也不操作实际部署数据。
+
+真实模型委派、远程 MCP、搜索质量与 Linux 实机未在本轮执行；本地协议 fixture 与 Linux 目标类型检查不冒充上述验证。R6 曾记录但未复现的 Workspace IO 失败仍保留其原始诊断边界，本轮未据此建立重试系统或宣称根因已解决。跨日语义地图、内部子 Turn 和功能规划中的新产品能力继续属于计划外演进。
+
+最终核对：本轮遵循 AGENTS 的单一 owner、分层失败、显式配置、真实 SPI 消费者和先事实后投影规则；没有新增需要维护者决定的业务语义。S3 与 S7 验收完成，主计划 S0–S7 所定义的本次重构范围完成；完整功能规划仍作为后续演进材料，不将其全部设想等同于本次已实现能力。
+
+### 13.4 R7 披露与查询一致性收口
+
+状态：`done`（维护者已确认修正方案；基于 `3889cce` 实施，代码、设计文档、下列验收及主计划 S3/S7 核对完成）。
+
+后续复核发现两处局部投影遗漏：活动 Action 来源遗漏失败详情和资源引用；语义节点的 Turn 来源查询只查展示正文，漏掉行动请求、结果等事实。两项在同一 Session owner 内补齐，不改变当前 Turn 与历史 Session 的边界：
+
+- 活动 `SessionEvidence` 归入 `views/navigation.py`，与已完成记录共用 `project_action`，仅增加 `source_state=active_turn`。`completion.py` 只转换 typed facts 和稳定 occurrence，不反向依赖视图。失败原因、反馈、规范结果和资源引用在活动读取与完成后读取中保持一致；活动 Turn 不进入 manifest、历史目录、话题成员或线性交互正文。当前 User Inputs/Trace 仍是活动事实 owner。
+- `views/inspection.py` 共用事实范围遍历：Turn 来源覆盖该 Turn 的事实，叶子来源只覆盖对应叶子；命中给出可精确读取的原始叶子 ref。Turn 与叶子来源重叠时去重，保持既有确定性次序；不沿横向语义关系或资源 Link 读取其它内容。范围检索继续避免重复检索历史 inspect 的取回正文，显式叶子读取不受影响。
+- 沿用 `DisclosurePage` 和内容绑定的 continuation：地图、Turn、Action 集合给下级入口，叶子返回内容；分页继续读取同一范围，inspect 子 ref 才下探。Background 压缩和 Organize 不代替该读取链，不新增 Action 或查询 LLM。
+
+验收对应：`test_organize.py::test_active_action_evidence_matches_completed_inspect_and_query` 覆盖成功资源引用、失败和超时，从真实 Context facts 经 Organize、段 prepare/install 到 inspect/query，再与完成记录对照；确认活动根不可作为历史 Turn 读取且事实读取不封存 Trace。`test_annotation_query_uses_turn_scope_and_leaf_scope` 覆盖请求、结果、失败、Working、输入、重叠来源去重和叶子边界。`test_session_engine.py::test_paginated_turn_retains_readable_children_and_action_leaves` 沿 Turn 分页返回的 Action 集合继续分页并读取叶子，同时检查输入、输出、Working、资源入口可读；既有 timeline、连续问答、背景压缩与 SDK 整理 E2E 继续复用。
+
+已同步 `docs/design/session.md`。按 AGENTS 核对，原事实与完成管线、User 写/SDK 与 Reflection 只读、分层失败、日生命周期保持一致；主计划只补 S3/S7 验收记录，不扩张本次重构范围。
+
+收口验证：开发期间全量 Fast `1142 passed, 28 deselected`；补齐成功引用/超时和分页回归后，Session 聚焦 Fast `43 passed`，最终 Full `1149 passed, 23 deselected`（包含全部非 external 测试、生成/wheel 和独立进程导入检查）。最终 `scripts/typecheck.ps1`、Linux 目标 `ty check` 与 `git diff --check` 通过。最终 Full 隔离运行标识为 `103aa79f694f4be1a704ca10a8e90c1e`，聚焦 Fast 为 `5560efc5f8294c3cbd575f8fca590485`；本节证据不扩大 §13.3 的真实外部服务与部署验证范围。

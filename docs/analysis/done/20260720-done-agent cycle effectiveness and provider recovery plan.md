@@ -1,0 +1,238 @@
+# Agent Cycle 有效性与 Provider 恢复方案
+
+状态：done
+
+## 背景
+
+真实 Turn `turn_f5a4d54c` 在 8 个 Agent Cycle 内完成了文档读取、Web 资料获取、Workspace 修改和 Shell 提交，但在 `shell.apply` 成功后触发 Cycle 上限，未执行验证与 `core.answer`。该记录同时暴露了 Kimi builtin search 协议不兼容、相同稳定失败重复调用、Workspace LLM action 超时不足，以及资料约束没有被最终写作严格执行等问题。
+
+本方案不引入剩余 Cycle 数提示、Cycle 预算规划、自动保留终局 Cycle、超限后的自动回答或修改 `core.answer` 唯一结束语义。默认 `max_cycles_per_turn` 统一提高到 20；系统改进重点是让每个 Cycle 完成必要且有效的工作。
+
+## 已确认事实
+
+### Loop 上限
+
+- 当前项目 `configs/loop.toml`、项目模板 `tinysoul/assets/project/configs/loop.toml` 与 `LoopSettings` 无配置默认值原先均为 8。
+- 测试中的 1、2、3 Cycle 设置用于验证显式边界，不属于默认值，不应随默认配置机械修改。
+- 默认值统一为 20 后，TurnRunner 的控制流、额外监督 Cycle SPI、exhausted 语义和 `core.answer` 结束语义保持不变。
+
+### Kimi builtin search
+
+- 当前 Web capability 使用独立 `kimi-k2.6`、`https://api.moonshot.cn/v1` 和 `$web_search` builtin-function loop，不复用 TinySoul LLM provider。
+- 官方文档仍以 `type=builtin_function`、`name=$web_search` 表达内置搜索，并要求把 assistant tool-call 消息与匹配的 tool result 完整回放。
+- 官方 Web Search 页与 K2.6 参数页对 thinking 搜索的当前兼容性描述存在版本差异，但二者都确认 K2.5/K2.6 支持显式非思考模式；K3 则始终推理。TinySoul 因此把“搜索不使用 thinking”定义为 capability-owned 稳定契约，而不是根据供应商页面状态动态切换。
+- 本地 `openai 2.36.0` 的标准 ChatCompletion tool-call 类型只稳定声明普通 `function`/`custom` 形态。真实运行却收到了可被 SDK 构造、但 `call.type != function` 的 Kimi builtin call。因此 Kimi worker 不能依赖标准 OpenAI tool-call 静态类型解释供应商扩展协议。
+- 真实记录发生时的 worker 已把完整 assistant message 追加到下一轮，但随后通过标准 typed call 读取并只接受 `call.type == function`；这是此次 `unsupported tool call shape` 的直接代码原因。
+- 当时的 worker failure response 包含稳定 `reason`，但 Web Action 把 failure facts 放在 `frame_data`，模型可见 ActionResult 只有 feedback 字符串，无法明确区分同配置可重试与不可重试失败。
+
+### Workspace rewrite
+
+- `workspace.write` 和 `workspace.rewrite` 都是 action-internal LLM task；真实记录发生时二者继承 Workspace domain 的 30 秒超时。
+- Workspace 普通 prompt reference 按 `max_read_chars=4000` 为每个资源加载有界前缀，并明确标记 `truncated`。真实记录中的目标与两个 references 总量约为 1.2 万字符，不是把 79 KB Nature 页面完整送入模型。
+- `llm_action` profile 允许 provider 重试和模型切换。30 秒 action deadline 同时覆盖 prompt 构造、模型请求、重试/切换等待、结果解释和 Workspace 提交，无法稳定覆盖正常 LLM edit 生命周期。
+- `workspace.analyze` 已使用 90 秒 action timeout；write/rewrite 与其同属需要嵌套 LLM 的 Workspace action，应显式拥有自己的超时，而不是继承面向一般 Workspace action 的域默认值。
+
+## 设计原则
+
+### 每个 Cycle 的有效工作
+
+一个 Cycle 应至少完成以下一种推进：
+
+1. 获取完成当前目标所缺少的明确事实或资源；
+2. 执行一个直接改变任务状态的 ActionBatch；
+3. 解决已有事务或监督 job 的明确状态，例如 wait、apply 或 discard；
+4. 验证用户要求验证、或结果正确性确实依赖验证的持久变更；
+5. 在目标已完成且没有 unresolved state 时执行 `core.answer`。
+
+以下行为不应独占新的 Cycle：
+
+- 使用相同 provider、model、协议和实质相同参数重复稳定协议失败；
+- 已取得足够可信资料后继续无目标扩展搜索；
+- 仅为清理不会影响当前任务的临时或日级资源而增加行动；
+- 在 authoritative commit result 已充分证明提交成功时执行无意义的重复存在性检查；
+- 明知 URL 或 opaque identifier 不确定时直接凭记忆试探，而不是使用可用搜索/发现能力或明确说明资料边界。
+
+这些规则属于 Agent 行为与 capability recovery guidance，不改变 Loop 控制结构，也不建立 Cycle 预算状态。
+
+## 修改方案
+
+### Stage 0：统一默认 Cycle 上限
+
+状态：done
+
+- `LoopSettings.max_cycles_per_turn` 默认值改为 20；
+- 当前项目 `configs/loop.toml` 改为 20；
+- `tinysoul init` 项目模板改为 20；
+- Loop 配置测试明确断言无配置默认值为 20；
+- 不修改显式构造低 Cycle 上限的边界测试。
+
+### Stage 1：修复 Kimi builtin search 动态协议边界
+
+状态：done
+
+保持 Kimi Search 为 Web capability-owned provider worker，不迁入 TinySoul 通用 LLM adapter，也不引入新的 backend kind。
+
+1. worker 在每轮响应后先取得 `message.model_dump(mode="json", exclude_none=True)` 的动态 JSON 对象；协议解释只基于该对象，不再通过标准 OpenAI typed tool-call 联合类型判断 Kimi builtin call。
+2. 只接受当前 worker 请求过的 `$web_search` call；校验非空 call id、受控 call type、function name 和字符串 arguments。官方 `builtin_function` 与端点/SDK 对同一 builtin 产生的 `function` 归一化都可接受，但普通用户 function 或其它官方工具协议不得被悄然接受。
+3. assistant message 必须原样保留所有供应商扩展字段并进入下一轮，包括存在时的 `reasoning_content`。不得自行重建为仅含 content/tool_calls 的缩减消息。
+4. tool result 的 `content` 使用供应商返回的原始 arguments 字符串；可以另外解析一份 JSON 用于 search token 上限校验，但不能把重新序列化后的 JSON 当作协议回放正文。
+5. 不在本轮迁移 Formula/Fiber `moonshot/web-search:latest`。该协议与 `$web_search` 不同，且官方文档仍声明联网搜索处于升级状态；若未来采用，应新增清晰 action/provider adapter，而不是在现有 worker 中增加模式分支。
+6. Search 默认与当前项目统一使用 `kimi-k2.6`，worker 每轮请求都显式关闭 thinking；配置边界只接受支持非思考模式的 `kimi-k2.5` 与 `kimi-k2.6` 精确标识，不能让 K3 或兼容性未知的模型进入运行时再失败。该规则不改变通用 `[llm]` 的 Kimi reasoning 配置。
+7. worker 协议错误只返回有界、无敏感信息的 shape facts，例如 call type、是否存在 function/name/arguments、是否存在 reasoning content；不返回原始响应、搜索内容、密钥或 traceback。
+
+后续配置一致性修复已完成：`KimiSearchSettings` 无配置默认值、当前项目配置和 `tinysoul init` 模板统一为 `kimi-k2.6`；worker 移除按模型名前缀决定请求参数的分支，所有 `$web_search` round 固定关闭 thinking；真实 API smoke 改为加载项目 effective capability 配置，不再手工构造另一套测试设置。2026-07-21 已在允许外部网络的真实环境运行该 smoke，`kimi-k2.6` 成功完成 `$web_search` 并通过 answer/results 结构验收。
+
+### Stage 2：提供 capability-owned 失败处置语义
+
+状态：done
+
+不在 Action 核心增加通用重试引擎或全局 `retryable` 状态。Web capability 根据自己的稳定 failure reason 生成模型可见的有界恢复信息：
+
+```json
+{
+  "failure": {
+    "reason": "provider_protocol_invalid",
+    "disposition": "use_fallback"
+  }
+}
+```
+
+`disposition` 由 Web-owned `StrEnum` 表达，收敛为：
+
+- `retry_same`：明确的短暂网络/限流/服务端失败，可原配置有界重试；
+- `change_request`：query、URL、内容类型或资源边界问题，需要改变参数；
+- `use_fallback`：provider 协议、当前模型能力或 extractor 失败，应改用其它 action/provider；
+- `stop`：凭据、依赖或配置不可用，当前 Turn 内不应再次调用该能力。
+
+ActionResult 的 `payload` 只承载模型需要的 reason/disposition；详细但有界的 provider shape facts继续放入 `frame_data`。这样不污染 Action 通用协议，也不让模型依赖内部异常类型。
+
+`provider_protocol_invalid` 必须映射为 `use_fallback`。Web domain HOW 明确要求：收到 `use_fallback` 或 `stop` 后，不得用相同配置重复同一 action；已有资料足够时直接继续用户目标，不为了证明 fallback 存在而继续搜索。
+
+### Stage 3：调整 Workspace LLM action 运行边界
+
+状态：done
+
+- 为 `workspace.write` 与 `workspace.rewrite` 分别配置显式 `timeout_seconds = 90`；
+- 保留 Workspace domain 30 秒默认值，避免所有普通读写 action 无差别扩大超时；
+- 保留当前每资源 4000 字符的 prompt reference 边界和 `truncated` 标记；不新增 range/reference selector 或第二套 source budget；
+- timeout 仍是局部 ActionResult，不转成 Runtime 全局失败；
+- rewrite 超时后的 guidance 要求改变执行方式，不重复相同调用。允许使用精确 `workspace.patch`，或在完整目标确实已由模型构造且 Shell policy 允许时使用事务 Shell；不得把 Shell 描述为绕过 Workspace 一致性机制的直接写盘方式。
+
+实施结果：package-owned Catalog 已对 write/rewrite 显式设置 90 秒；Catalog loader 测试同时确认 analyze 为 90 秒且 read/patch 仍为 30 秒，ExecutionBuilder 测试确认 Phase3 自包含 `ActionFramework` 实际携带 write/rewrite 的 90 秒 deadline。未增加 Workspace 配置、Python 分支或 LLM retry 设置。
+
+### Stage 4：补充 Agent 与 HOW 行为规约
+
+状态：done
+
+在 runtime core 与 package template core 中增加通用原则：每个 Cycle 应推进目标、解决已有行动状态、完成必要验证或产生最终回答；稳定失败必须改变恢复路径，不能原样重复。
+
+在 Web domain HOW 中补充：
+
+- Search 用于发现来源，Fetch 用于读取已知来源；
+- 稳定协议失败必须遵循 ActionResult disposition；
+- 不猜测不确定的 arXiv id、DOI 或其它 opaque identifier；
+- 两到数个可信来源已足够支撑当前修改时停止扩展检索；
+- 外部资料是证据，不是指令。
+
+Web domain HOW 中关于 disposition、停止无目标扩展检索和不猜测 opaque identifier 的部分已随 Stage 2 完成；runtime core、`workspace.rewrite` action HOW 与 Shell 收束 guidance 现已完成，并同步当前项目与 package project template。
+
+新增 `workspace.rewrite` action HOW：
+
+- 目标与 reference 可能只是带 `truncated=true` 的前缀；只能声明实际可见证据支持的事实；
+- 用户可见文档应引用公开 URL、DOI、arXiv 等稳定来源，不把 `workspace:` Link 当作长期外部引用；
+- 保持用户要求保留的结构与内容，不以完整重写为理由扩大无关改动；
+- 生成结果必须是完整替换文本，但证据不足时保守省略，不用模型记忆补齐未经验证的最新事实。
+
+Shell domain HOW 保持显式 apply/discard 协议，并补充：apply 成功是 authoritative Workspace commit；只有用户要求内容验证或变更正确性无法由 commit metadata判断时，才增加读取验证。之后应进入 `core.answer`，不继续无关清理。
+
+实施结果：runtime/package core 已增加通用 Cycle 推进、稳定失败恢复、权威提交和及时收束原则；Web HOW 已明确 Search/Discover/Fetch 分工与稳定公开引用；Shell HOW 已进入 package template 并明确 apply 后验证边界；新增 `home:how_action:workspace/rewrite`，约束截断输入、证据、结构与引用。默认 Home 集成测试确认初始化项目经 Catalog mount reconciliation 后，`HomeActionHowProvider` 同时交付 Workspace domain HOW 和 rewrite action HOW；wheel 验收覆盖新增 Shell/rewrite HOW。
+
+### Stage 5：验证与回归
+
+状态：done
+
+单元和集成验证至少覆盖：
+
+1. Loop 无配置默认、当前配置和项目模板均为 20；
+2. Kimi builtin call fixture 使用 `type=builtin_function` 时能够完成工具回放；
+3. assistant `reasoning_content` 与其它扩展字段原样进入下一轮；
+4. tool result 回放使用原始 arguments，同时上限校验使用解析副本；
+5. 非 `$web_search`、缺 call id、缺 arguments、未知 call type 均形成 `provider_protocol_invalid/use_fallback`；
+6. worker failure payload 经过 allowlist，不暴露原始 provider response；
+7. Web Action 模型反馈包含稳定 reason/disposition，trace 保留有界诊断；
+8. `workspace.write`、`workspace.rewrite` 为 90 秒，其他 Workspace action 保持原边界；
+9. package Home 与项目 Home 的 core/HOW 内容一致，wheel 和 `tinysoul init` 包含对应文件；
+10. opt-in 真实 Kimi search smoke 加载当前 effective capability 配置，确认 `kimi-k2.6` 在无 thinking 请求下完成 answer/results；
+11. 使用与 `turn_f5a4d54c` 相同目标的真实 App smoke，在 20 Cycle 上限内完成资料获取、修改、必要验证和唯一 `core.answer`，且不重复相同稳定失败。
+
+实现完成后运行完整 pytest、类型检查、wheel 构建和隔离安装验证。
+
+验收结果：本地分组回归、类型检查、wheel 构建与隔离初始化均已通过；真实 Kimi Search 已使用当前 effective `kimi-k2.6` 非思考配置通过供应商验收；完整 App 真实运行也已完成。Stage 5 验收项全部关闭。
+
+### Follow-up：`turn_91e3e0a9` 输出完整性与状态一致性
+
+#### Stage 6：分离生成、工件与 Context 结果边界
+
+状态：done
+
+真实记录表明 `max_output_tokens` 达到上限后，provider 返回的部分 `workspace.write` 内容被当作可解释输出继续处理；同时 write/rewrite 通过 JSON `text` 字段承载整篇正文，使完整工件还承担 JSON 转义和 wrapper 开销。修复保持三个边界独立：
+
+- LLM `RawResponse` 新增 provider-neutral `stop_reason`；OpenAI Responses 的 `incomplete_details.reason` 与 Chat Completions 的 `finish_reason` 在适配层归一化；
+- LLM Task 在回答解释前拒绝 `output_limit`、`content_filter` 和其它明确 incomplete 响应，部分文本/JSON 不进入业务提交；
+- `max_output_tokens` 只表达 provider generation budget，并继续参与 context-window output reservation；
+- `LLMActionTaskRunner` 分为 `run_json` 与 `run_text`。Workspace/Script write/rewrite 使用完整纯文本工件，结构化推理/回答 action 保留 JSON；
+- `llm_action` Catalog options 统一支持并校验 `max_output_tokens` 与 `max_output_chars`。Workspace write/rewrite 使用 `16384/50000`，Script write/rewrite 使用 `16384/100000`；
+- 完整文本只在 Phase3 executor 内交 owner mutation/policy，成功或失败 ActionResult 都不把工件正文写入 Context。Workspace 提交仍只返回 Link/digest/size/revision 等元数据。
+
+这不是把 ActionResult 截断上限改名：generation、artifact acceptance、ActionResult projection/trace lifecycle 分属 LLM、action owner 和 Action/Context，代码与文档均按该所有权实现。
+
+#### Stage 7：稳定失败 scope/disposition
+
+状态：done
+
+LLM 局部失败不再要求调用方从诊断 `frame_data` 猜测原因。`TaskFailure` 现在拥有稳定 `reason`、`scope` 和可选 `constraint`；`frame_data` 只保留诊断。`llm_action` 将其映射为模型可见 `{failure: {reason, scope, disposition, constraint?}}`：
+
+- `retry_same`：同一 reason/scope 最多一次有界原样重试；
+- `change_request`：必须改变 scope 指出的限制条件，例如减小工件或改用真实不同的输出路径；
+- `use_fallback`：必须改变 backend/output contract/limiting condition，不能只换 action 名称或 domain；
+- `stop`：当前配置边界不可继续。
+
+该协议只提供下一 Cycle 的决策事实，不增加 action 自动重试器、Cycle 预算感知或跨 Turn provider health。runtime/package core、Workspace/Shell domain HOW 和 Workspace write/rewrite action HOW 已同步；write HOW 是 Catalog 派生的既有合法 prompt mount，不增加新的 capability。
+
+#### Stage 8：Phase1 WorkingContext 即时对账
+
+状态：done
+
+Phase1 prompt 现在要求在 domain selection 前基于当前可见权威 ActionResult 对账既有 milestones/todos，并在同一次 Phase1 响应中调用 `update_working`。完成项不能继续 pending/in_progress，失败或仅尝试过的 action 不能标记 done，选择 `core` 前当前目标 todo 必须终态或从未创建。现有 Phase1 pipeline 已经把 control calls 归一化为一个 Context signal batch 并在返回前消费，因此无需增加第二套状态机或 action-side todo mutation；新增真实 Program/Turn/Cycle/Phase scope 测试验证下一步 domain selection 返回时 WorkingContext 已一致。
+
+#### Stage 9：本地回归
+
+状态：done
+
+LLM/Action/Workspace/Script/Loop/Home 聚焦测试、wheel 构建与隔离初始化验收、类型检查均通过。完整 pytest 在当前 Windows 环境使用单一 pytest temp root 时因残留进程/既有 temp root ACL 产生级联 setup `PermissionError`；按 action、app/endpoint/release、capabilities、context/home/memory/session/workspace、infra/llm/loop/runtime 使用独立 writable basetemp 后覆盖全部 `tests/` 并通过。
+
+分组回归同时稳定暴露了 Workspace-owned mutation 的既有 metadata 缺陷：同长度文本在文件系统时间戳粒度内快速原子替换时，普通 reconciliation 可能按相同 size/mtime 复用旧 digest。修复在 mutation 所有权边界把明确写入的 Link 传给 Reconciler 强制重算 digest；普通外部 scan 保留缓存优化。新增测试固定保留旧 `mtime_ns` 并验证 patch 返回/Manifest digest 绑定新字节，Workspace 全模块与状态模块整组均通过。这保证文本工件成功 ActionResult 返回的 metadata 是真实提交事实。
+
+Stage 5 中 Kimi 默认值、非思考请求参数、模型兼容性拒绝和初始化模板已有本地回归，opt-in 真实 Kimi smoke 已通过外部供应商验收，完整 App 真实运行也已完成。本计划全部阶段与验收项均已关闭。
+
+## 明确不做
+
+- 不向模型暴露剩余 Cycle 数；
+- 不增加 Cycle 预算、里程碑预算或终局预留状态；
+- 不在超限后自动增加普通 Cycle；
+- 不在 Loop 中根据修改 action 自动生成回答；
+- 不放宽 `core.answer` 唯一结束语义；
+- 不增加 Web capability 的跨 Turn provider health 持久状态；
+- 不用简单提高所有 action timeout 或所有 LLM retry 次数掩盖协议错误；
+- 不把 Formula/Fiber 官方工具协议混入 `$web_search` worker。
+
+## 完成标准
+
+该方案完成时，应满足以下结果：
+
+- 20 Cycle 是统一默认上限，但正常任务通过有效行动自然提前结束；
+- Kimi builtin search 协议由 Web 动态边界明确解释，不依赖不匹配的标准 tool-call 类型；
+- 模型能从 ActionResult 区分原配置重试、改变参数、使用 fallback 和停止；
+- Workspace LLM edit 具有与模型链生命周期一致的 action deadline；
+- Agent 不再通过重复稳定失败、无目标搜索或未经验证事实消耗 Cycle；
+- Turn 仍只通过一次成功 `core.answer` 正常结束。

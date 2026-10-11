@@ -1,0 +1,594 @@
+"""MCP discovery and call facade; all four actions consume one owner directory."""
+
+from __future__ import annotations
+
+import json
+from base64 import b64decode
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from time import monotonic
+from typing import TYPE_CHECKING
+from uuid import uuid4
+
+from tinysoul.prompts.plugins.capabilities import expand as prompt_text
+from tinysoul.infra.concurrency import CleanupDiagnostic, JoinedOperations
+from tinysoul.infra.json import JsonObject, JsonValue, dumps_json
+from tinysoul.infra.paging import PageOptions
+from tinysoul.kernel.retrieval.contracts import (
+    AttributeField,
+    AttributeFilters,
+    ContentUnit,
+    DirectorySource,
+    QuerySource,
+    RefsSource,
+    RetrievalRequest,
+    SearchCandidate,
+    SearchFailure,
+    SearchFailureKind,
+    TextQuery,
+)
+from tinysoul.kernel.retrieval.operations import SearchCorpus
+from tinysoul.plugins.workspace.inspection.models import WorkspaceBundleWrite
+from tinysoul.plugins.workspace.services import WorkspaceExecutionPort
+from tinysoul.runtime import (
+    ObservationEmitter,
+    ObservationEvent,
+    ObservationLevel,
+    emit_observation,
+)
+
+MCP_SEARCH_FILTERS = AttributeFilters(
+    (AttributeField("server_id"), AttributeField("tool_name"))
+)
+from .config import ExpandSettings, validate_expand_bindings
+from .failures import ExpandFailure, ExpandRequestError
+
+if TYPE_CHECKING:
+    from tinysoul.infra.json.schema import JSONSchema
+
+    from .mcp.client import MCPConnection, ToolDirectory
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    server_id: str
+    name: str
+    definition: JsonObject
+    inputs: JSONSchema | None
+    output: JSONSchema | None
+    problem: str = ""
+
+    @property
+    def identity(self) -> JsonObject:
+        return {"server_id": self.server_id, "tool_name": self.name}
+
+    def summary(self) -> JsonObject:
+        description = self.definition.get("description", "")
+        return {
+            **self.identity,
+            "description": str(description)[:1000],
+            "callable": not self.problem,
+            **({"unavailable": self.problem} if self.problem else {}),
+        }
+
+    def describe(self) -> JsonObject:
+        return {
+            **self.summary(),
+            **({"definition": self.definition} if not self.problem else {}),
+        }
+
+
+@dataclass(frozen=True)
+class Discovery:
+    tools: tuple[ToolDefinition, ...]
+    servers: tuple[JsonObject, ...]
+
+
+@dataclass(frozen=True)
+class _Page:
+    items: tuple[JsonObject, ...]
+    offset: int
+    expires: float
+    kind: str
+    sources: tuple[tuple[str, ToolDirectory | None], ...]
+
+
+class ExpandEngine:
+    def __init__(
+        self,
+        settings: ExpandSettings,
+        *,
+        root: Path,
+        workspace: WorkspaceExecutionPort,
+        environment: Mapping[str, str],
+        observations: ObservationEmitter | None = None,
+    ) -> None:
+        self.settings, self._workspace = settings, workspace
+        self._observations = observations
+        self._connections: dict[str, MCPConnection] = {}
+        self._pages: dict[str, _Page] = {}
+        self._problems: dict[str, str] = {}
+        self._definitions: dict[
+            str, tuple[ToolDirectory, tuple[ToolDefinition, ...]]
+        ] = {}
+        validate_expand_bindings(settings, environment)
+        enabled = tuple(server for server in settings.servers if server.enabled)
+        if enabled:
+            from .mcp.client import MCPConnection
+
+            for server in enabled:
+                self._connections[server.server_id] = MCPConnection(
+                    server, settings, root=root, environment=environment
+                )
+
+    @property
+    def available(self) -> bool:
+        return bool(self._connections)
+
+    async def discover(self, server_ids: tuple[str, ...] | None = None) -> Discovery:
+        from tinysoul.infra.json.schema import JSONSchema, JSONSchemaError
+
+        tools: list[ToolDefinition] = []
+        servers: list[JsonObject] = []
+        identities = (
+            tuple(dict.fromkeys(server_ids))
+            if server_ids is not None
+            else tuple(self._connections)
+        )
+        for identity in identities:
+            connection = self._connections.get(identity)
+            if connection is None:
+                servers.append({"server_id": identity, "status": "unavailable"})
+                continue
+            status: JsonObject = {
+                "server_id": identity,
+                "description": connection.server.description[:1000],
+            }
+            try:
+                directory = await connection.directory()
+            except ExpandRequestError as exc:
+                self._problems[identity] = exc.reason.value
+                self._directory_changed(identity)
+                servers.append(
+                    {**status, "status": "unavailable", "reason": exc.reason.value}
+                )
+                continue
+            cached = self._definitions.get(identity)
+            self._problems.pop(identity, None)
+            if cached is not None and cached[0] is directory:
+                tools.extend(cached[1])
+                servers.append(
+                    {**status, "status": "available", "tool_count": len(cached[1])}
+                )
+                continue
+            start = len(tools)
+            count = 0
+            for definition in directory.tools:
+                name = definition.get("name")
+                if not isinstance(name, str) or not connection.server.allows(name):
+                    continue
+                count += 1
+                inputs = output = None
+                problem = ""
+                try:
+                    if (
+                        len(dumps_json(definition))
+                        > self.settings.max_inline_chars - 1024
+                    ):
+                        raise JSONSchemaError(
+                            "Tool definition exceeds the complete-definition limit."
+                        )
+                    input_schema, output_schema = (
+                        definition.get("inputSchema"),
+                        definition.get("outputSchema"),
+                    )
+                    if not isinstance(input_schema, dict) or (
+                        output_schema is not None
+                        and not isinstance(output_schema, dict)
+                    ):
+                        raise JSONSchemaError("Tool schemas must be objects.")
+                    inputs = JSONSchema(input_schema)
+                    output = (
+                        JSONSchema(output_schema)
+                        if isinstance(output_schema, dict)
+                        else None
+                    )
+                except JSONSchemaError:
+                    problem = "unsupported_schema"
+                tools.append(
+                    ToolDefinition(identity, name, definition, inputs, output, problem)
+                )
+            servers.append({**status, "status": "available", "tool_count": count})
+            self._definitions[identity] = (directory, tuple(tools[start:]))
+            self._directory_changed(identity)
+        return Discovery(tuple(tools), tuple(servers))
+
+    def _directory_changed(self, server_id: str) -> None:
+        if self._observations is None:
+            return
+        emit_observation(
+            self._observations,
+            ObservationEvent(
+                name="expand.directory.changed",
+                level=ObservationLevel.VERBOSE,
+                source="expand",
+                payload={"server_id": server_id},
+            ),
+        )
+
+    def servers_view(self, page: PageOptions = PageOptions()) -> JsonObject:
+        values: tuple[JsonObject, ...] = tuple(
+            {
+                "server_id": server.server_id,
+                "description": server.description,
+                "enabled": server.enabled,
+                **(
+                    self._connections[server.server_id].status_view()
+                    if server.server_id in self._connections
+                    else {"connected": False, "discovered": False, "stale": False}
+                ),
+                "tool_count": len(self._definitions[server.server_id][1])
+                if server.server_id in self._definitions
+                else 0,
+                "error": self._problems.get(server.server_id),
+            }
+            for server in self.settings.servers
+        )
+        return page.render(values, owner="expand", ref="servers")
+
+    def tools_view(
+        self,
+        server_id: str,
+        *,
+        tool_name: str | None = None,
+        page: PageOptions = PageOptions(),
+    ) -> JsonObject:
+        if not any(server.server_id == server_id for server in self.settings.servers):
+            raise ExpandRequestError(
+                ExpandFailure.INVALID_REQUEST, prompt_text.UNKNOWN_MCP_SERVER
+            )
+        cached = self._definitions.get(server_id)
+        values = tuple(
+            tool.describe() if tool_name else tool.summary()
+            for tool in (cached[1] if cached else ())
+            if tool_name is None or tool.name == tool_name
+        )
+        return page.render(
+            values,
+            owner="expand",
+            ref=f"tools:{server_id}:{tool_name}",
+            base={"server_id": server_id, "discovered": cached is not None},
+        )
+
+    async def refresh(self, server_id: str) -> JsonObject:
+        connection = self._connections.get(server_id)
+        if connection is None:
+            raise ExpandRequestError(
+                ExpandFailure.UNAVAILABLE, prompt_text.MCP_SERVER_IS_NOT_ENABLED
+            )
+        connection.invalidate()
+        discovery = await self.discover((server_id,))
+        return discovery.servers[0]
+
+    async def search_corpus(self, request: RetrievalRequest) -> SearchCorpus:
+        source = request.source
+        if not isinstance(source, (QuerySource, DirectorySource, RefsSource)):
+            raise SearchFailure(
+                SearchFailureKind.INVALID_REQUEST,
+                prompt_text.MCP_SEARCH_USES_A_DECLARED_SERVER_TOOL_DIRECTORY,
+            )
+        scope = getattr(source, "scope", "all")
+        if scope != "all" and not scope.startswith("server:"):
+            raise SearchFailure(
+                SearchFailureKind.INVALID_REQUEST,
+                prompt_text.MCP_SCOPE_MUST_BE_ALL_OR_SERVER_ID,
+            )
+        predicates = MCP_SEARCH_FILTERS.parse(getattr(source, "where", {}))
+        discovered = await self.discover(
+            None if scope == "all" else (scope.removeprefix("server:"),)
+        )
+        selected_refs = set(source.refs) if isinstance(source, RefsSource) else set()
+        available = [s for s in discovered.servers if s.get("status") == "available"]
+        if len(available) != len(discovered.servers):
+            raise SearchFailure(
+                SearchFailureKind.SOURCE_UNAVAILABLE,
+                prompt_text.SELECTED_SERVER_UNAVAILABLE,
+            )
+        candidates = []
+        query = (
+            source.query.text
+            if isinstance(source, QuerySource) and isinstance(source.query, TextQuery)
+            else ""
+        )
+        total_input = len(query)
+        for tool in discovered.tools:
+            ref = "mcp:" + tool.server_id + "/" + tool.name
+            if ref in request.exclude_refs or (
+                selected_refs and ref not in selected_refs
+            ):
+                continue
+            attributes: JsonObject = {
+                "server_id": tool.server_id,
+                "tool_name": tool.name,
+            }
+            if tool.problem or not all(
+                predicate.matches(attributes) for predicate in predicates
+            ):
+                continue
+            evidence = dumps_json(tool.definition)
+            total_input += len(evidence)
+            candidates.append(
+                SearchCandidate(
+                    ref,
+                    tool.name,
+                    (ContentUnit(ref, ref, evidence, "tool_directory"),),
+                    attributes,
+                )
+            )
+        if isinstance(source, RefsSource):
+            order = {ref: index for index, ref in enumerate(dict.fromkeys(source.refs))}
+            missing = (
+                selected_refs
+                - {item.ref for item in candidates}
+                - set(request.exclude_refs)
+            )
+            if missing:
+                raise SearchFailure(
+                    SearchFailureKind.INVALID_REQUEST,
+                    prompt_text.MCP_REF_IS_NOT_AVAILABLE_IN_THE_TOOL_DIRECTORY,
+                )
+            candidates.sort(key=lambda item: order[item.ref])
+        if total_input > self.settings.search_max_chars:
+            raise SearchFailure(
+                SearchFailureKind.SCOPE_REQUIRED,
+                prompt_text.DIRECTORY_CAPACITY_EXCEEDED,
+            )
+        return SearchCorpus(
+            tuple(candidates),
+            "",
+            len(discovered.tools),
+            len(available) == len(discovered.servers),
+        )
+
+    def page(
+        self,
+        items: tuple[JsonObject, ...] = (),
+        *,
+        servers: tuple[JsonObject, ...] = (),
+        cursor: str | None = None,
+        kind: str,
+        max_chars: int | None = None,
+    ) -> JsonObject:
+        limit = (
+            min(max_chars, self.settings.max_inline_chars)
+            if max_chars is not None
+            else self.settings.max_inline_chars
+        )
+        now = monotonic()
+        self._pages = {
+            key: page for key, page in self._pages.items() if page.expires > now
+        }
+        offset = 0
+        sources = tuple(
+            (
+                str(server["server_id"]),
+                self._connections[str(server["server_id"])].directory_identity,
+            )
+            for server in servers
+            if str(server["server_id"]) in self._connections
+        )
+        if cursor is not None:
+            page = self._pages.get(cursor)
+            if (
+                page is None
+                or page.kind != kind
+                or any(
+                    self._connections[identity].directory_identity is not directory
+                    for identity, directory in page.sources
+                )
+            ):
+                raise ExpandRequestError(
+                    ExpandFailure.INVALID_REQUEST,
+                    prompt_text.DIRECTORY_PAGE_EXPIRED_DESCRIBE_THE_SCOPE_AGAIN,
+                )
+            items, offset = page.items, page.offset
+            sources = page.sources
+        else:
+            items = (
+                *({"server": server} for server in servers),
+                *({"tool": item} for item in items),
+            )
+        selected: list[JsonValue] = []
+        server_page: list[JsonValue] = []
+        size = 128
+        while offset < len(items) and len(selected) < self.settings.page_size:
+            item = items[offset]
+            item_size = len(dumps_json(item))
+            if size + item_size > limit:
+                if not selected and not server_page:
+                    raise ExpandRequestError(
+                        ExpandFailure.CAPACITY,
+                        prompt_text.DIRECTORY_ITEM_EXCEEDS_RESPONSE_CAPACITY,
+                    )
+                break
+            if "server" in item:
+                server_page.append(item["server"])
+            else:
+                selected.append(item["tool"])
+            size += item_size
+            offset += 1
+        next_page: str | None = None
+        if offset < len(items):
+            if len(self._pages) >= 16:
+                del self._pages[next(iter(self._pages))]
+            next_page = uuid4().hex
+            self._pages[next_page] = _Page(items, offset, now + 300, kind, sources)
+        return {"servers": server_page, "tools": selected, "next_page": next_page}
+
+    async def call(
+        self,
+        server_id: str,
+        name: str,
+        arguments: JsonObject,
+        *,
+        operations: JoinedOperations,
+    ) -> JsonObject:
+        from tinysoul.infra.json.schema import (
+            JSONSchemaError,
+            JSONSchemaValidationError,
+        )
+
+        discovered = await self.discover((server_id,))
+        tool = next((item for item in discovered.tools if item.name == name), None)
+        if tool is None:
+            raise ExpandRequestError(
+                ExpandFailure.UNAVAILABLE,
+                prompt_text.TOOL_IS_UNAVAILABLE_OR_EXCLUDED_BY_SERVER_POLICY,
+            )
+        if tool.problem or tool.inputs is None:
+            raise ExpandRequestError(
+                ExpandFailure.SCHEMA,
+                prompt_text.UNSUPPORTED_TOOL_DEFINITION,
+            )
+        try:
+            tool.inputs.validate(arguments)
+        except JSONSchemaValidationError as exc:
+            raise ExpandRequestError(
+                ExpandFailure.ARGUMENTS,
+                prompt_text.ARGUMENTS_DO_NOT_SATISFY_THE_TOOL_DEFINITION,
+            ) from exc
+        except JSONSchemaError as exc:
+            raise ExpandRequestError(
+                ExpandFailure.SCHEMA, prompt_text.TOOL_SCHEMA_COULD_NOT_BE_RESOLVED
+            ) from exc
+        result = await self._connections[server_id].call(name, arguments)
+        structured = result.get("structuredContent")
+        if tool.output is not None and not result.get("isError"):
+            try:
+                tool.output.validate(structured)
+            except JSONSchemaError as exc:
+                raise ExpandRequestError(
+                    ExpandFailure.REMOTE,
+                    prompt_text.INVALID_TOOL_OUTPUT,
+                ) from exc
+        return await self._project_result(tool, result, operations)
+
+    async def _project_result(
+        self, tool: ToolDefinition, result: JsonObject, operations: JoinedOperations
+    ) -> JsonObject:
+        serialized = dumps_json(result)
+        if len(serialized.encode()) > self.settings.max_result_bytes:
+            raise ExpandRequestError(
+                ExpandFailure.CAPACITY,
+                prompt_text.TOOL_OUTPUT_LIMIT_EXCEEDED,
+            )
+        prefix = f"workspace:mcp/{uuid4().hex}"
+        writes: list[WorkspaceBundleWrite] = []
+        content: list[JsonValue] = []
+        blocks = result.get("content", [])
+        if not isinstance(blocks, list):
+            raise ExpandRequestError(
+                ExpandFailure.REMOTE, prompt_text.TOOL_CONTENT_IS_INVALID
+            )
+        for index, block in enumerate(blocks):
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text":
+                text = block.get("text", "")
+                if not isinstance(text, str):
+                    continue
+                if result.get("structuredContent") is not None:
+                    try:
+                        if json.loads(text) == result["structuredContent"]:
+                            continue
+                    except ValueError:
+                        pass
+                if len(text) <= self.settings.max_inline_chars:
+                    content.append({"type": "text", "text": text})
+                    continue
+                ref = f"{prefix}/{index}.txt"
+                writes.append(WorkspaceBundleWrite(ref, text.encode()))
+                content.append({"ref": ref, "summary": text[:500]})
+            elif kind in {"image", "audio", "resource"}:
+                resource = block.get("resource") if kind == "resource" else block
+                if not isinstance(resource, dict):
+                    continue
+                encoded, text = (
+                    resource.get("data", resource.get("blob")),
+                    resource.get("text"),
+                )
+                try:
+                    data = (
+                        text.encode()
+                        if isinstance(text, str)
+                        else b64decode(encoded, validate=True)
+                        if isinstance(encoded, str)
+                        else b""
+                    )
+                except ValueError as exc:
+                    raise ExpandRequestError(
+                        ExpandFailure.REMOTE,
+                        prompt_text.TOOL_RETURNED_INVALID_EMBEDDED_CONTENT,
+                    ) from exc
+                suffix = {
+                    "image/png": ".png",
+                    "image/jpeg": ".jpg",
+                    "audio/wav": ".wav",
+                    "audio/mpeg": ".mp3",
+                }.get(
+                    str(resource.get("mimeType")),
+                    ".txt" if isinstance(text, str) else ".bin",
+                )
+                ref = f"{prefix}/{index}{suffix}"
+                writes.append(WorkspaceBundleWrite(ref, data))
+                content.append(
+                    {
+                        "ref": ref,
+                        "media_type": resource.get(
+                            "mimeType", "application/octet-stream"
+                        ),
+                    }
+                )
+            elif kind == "resource_link":
+                content.append(
+                    {
+                        "type": "external_resource",
+                        "uri": block.get("uri"),
+                        "name": block.get("name"),
+                    }
+                )
+        payload: JsonObject = {
+            **tool.identity,
+            "is_error": result.get("isError", False),
+            "content": content,
+        }
+        if result.get("structuredContent") is not None:
+            payload["structured"] = result["structuredContent"]
+        if len(dumps_json(payload)) > self.settings.max_inline_chars:
+            ref = f"{prefix}/result.json"
+            writes.append(WorkspaceBundleWrite(ref, dumps_json(payload).encode()))
+            payload = {
+                **tool.identity,
+                "is_error": result.get("isError", False),
+                "result_ref": ref,
+            }
+        if writes:
+            await operations.run(lambda: self._workspace.write_bundle(tuple(writes)))
+        return payload
+
+    async def close(self) -> tuple[CleanupDiagnostic, ...]:
+        return await self.release_day()
+
+    async def release_day(self) -> tuple[CleanupDiagnostic, ...]:
+        """Release connections and derived directory state before changing day."""
+        diagnostics: list[CleanupDiagnostic] = []
+        for connection in self._connections.values():
+            diagnostics.extend(await connection.close())
+            connection.invalidate()
+        # Keep the configured server identities.  MCP connections are lazy and
+        # recreate their transport after the new day is active.
+        self._pages.clear()
+        self._definitions.clear()
+        return tuple(diagnostics)

@@ -1,0 +1,494 @@
+"""Workspace actions use the same scoped service as SDK and Gateway."""
+
+from __future__ import annotations
+
+from tinysoul.infra.continuation import ContinuationError, ContinuationFailureReason
+from tinysoul.infra.json import JsonObject, to_json_object
+from tinysoul.kernel.action import (
+    ActionExecution,
+    ActionExecutionContext,
+    ActionExecutor,
+    ActionResult,
+    ActionTraceProjection,
+)
+from tinysoul.kernel.action.tasks import ActionTaskFactory, ActionTaskOutput
+from tinysoul.kernel.context import PromptBlock, PromptReferenceError, TaskPrompt
+from tinysoul.kernel.loop.phases import LLMRunner
+from tinysoul.kernel.retrieval.contracts import (
+    ModelStep,
+    SearchContext,
+    SearchFailure,
+)
+from tinysoul.kernel.retrieval.requests import parse_retrieval_request
+from tinysoul.llm.protocol.responses import AnswerFormat
+from tinysoul.prompts.plugins import workspace as prompt_text
+
+from ..errors import WorkspaceContractError, WorkspaceError
+from ..inspection.models import WorkspaceTextRangeResult
+from ..inspection.text import WorkspaceTextPosition
+from ..prompts import WorkspacePromptReferenceResolver
+from ..runtime_bridge import RuntimeWorkspaceBridge
+from ..services import WorkspaceService
+from ..storage.manifest import WorkspaceResourceRecord, WorkspaceTag
+from ..storage.mutations import WorkspaceTextEdit
+from .results import _failed, _success
+
+
+class WorkspaceExecutor(ActionExecutor):
+    """Validate intent, perform bounded work, and publish committed metadata."""
+
+    def __init__(
+        self,
+        workspace: WorkspaceService,
+        tasks: ActionTaskFactory,
+        llm: LLMRunner,
+        bridge: RuntimeWorkspaceBridge,
+    ) -> None:
+        self._workspace = workspace
+        self._tasks, self._llm, self._bridge = tasks, llm, bridge
+
+    async def execute(
+        self, execution: ActionExecution, context: ActionExecutionContext
+    ) -> ActionResult:
+        workspace = self._workspace.using(context.owner_operations)
+        try:
+            return await self._execute(workspace, execution, context)
+        except SearchFailure as exc:
+            return _failed(execution, str(exc), {"reason": exc.kind.value})
+        except ContinuationError as exc:
+            return _failed(
+                execution,
+                prompt_text.inspect_page_budget(workspace.max_read_chars)
+                if exc.reason is ContinuationFailureReason.BUDGET_TOO_SMALL
+                else prompt_text.INSPECT_CONTINUATION_INVALID,
+                {"reason": exc.reason.value, "ref": execution.call.params.get("ref")},
+            )
+        except PromptReferenceError as exc:
+            return _failed(
+                execution,
+                prompt_text.TASK_SOURCES_UNAVAILABLE,
+                {"reason": exc.reason, **exc.payload},
+            )
+        except WorkspaceContractError:
+            return _failed(
+                execution,
+                prompt_text.INVALID_WORKSPACE_REQUEST,
+                {"reason": "request_conflict"},
+            )
+        except WorkspaceError as exc:
+            raise self._bridge.from_workspace_error(exc) from exc
+
+    async def _execute(
+        self,
+        workspace: WorkspaceService,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+    ) -> ActionResult:
+        params, action = execution.call.params, execution.call.action_name
+        if action == "workspace.inspect":
+            ref = _text(params, "ref")
+            continuation = params.get("continuation")
+            if continuation is not None and not isinstance(continuation, str):
+                raise WorkspaceContractError("Continuation must be text")
+            page = await workspace.inspect(
+                ref,
+                continuation=continuation,
+                max_chars=_integer(params, "max_chars", workspace.max_read_chars),
+            )
+            return _success(
+                execution,
+                page.to_json(),
+                model_text=page.model_text,
+                trace_projection=ActionTraceProjection(
+                    origin_refs=(ref,),
+                    canonical_payload=page.canonical_payload,
+                    model_text=page.recollection_text,
+                ),
+            )
+        if action == "workspace.list":
+            result = await workspace.reconcile()
+            if not result.complete:
+                return _failed(
+                    execution,
+                    prompt_text.LISTING_INCOMPLETE,
+                    {
+                        "reason": "incomplete_reconciliation",
+                        "skip_counts": to_json_object(result.skip_counts()),
+                    },
+                )
+            prefix = _text(params, "directory", default="")
+            if prefix:
+                from ..refs import WorkspaceRef
+
+                prefix = str(WorkspaceRef.parse(prefix.rstrip("/"))) + "/"
+            records = tuple(
+                record
+                for record in result.manifest.resources
+                if not prefix or record.ref.startswith(prefix)
+            )
+            offset, limit = _integer(params, "offset", 0), _integer(params, "limit", 32)
+            if offset < 0 or not 1 <= limit <= 64 or offset > len(records):
+                raise WorkspaceContractError("Workspace listing page is invalid")
+            selected = records[offset : offset + limit]
+            return _success(
+                execution,
+                to_json_object(
+                    {
+                        "resources": [record.to_json() for record in selected],
+                        "total": len(records),
+                        "offset": offset,
+                        "next_offset": (
+                            offset + len(selected)
+                            if offset + len(selected) < len(records)
+                            else None
+                        ),
+                    }
+                ),
+            )
+        if action == "workspace.read":
+            ref = _text(params, "ref")
+            result = await workspace.read_text_range(
+                ref,
+                start_line=_integer(params, "start_line", 1),
+                end_line=_integer(params, "end_line", 2**31 - 1),
+                cursor=_integer(params, "cursor", 0),
+                max_chars=_integer(params, "max_chars", workspace.max_read_chars),
+            )
+            payload = _text_range_payload(result)
+            canonical = {key: value for key, value in payload.items() if key != "text"}
+            canonical["folded"] = True
+            return _success(
+                execution,
+                payload,
+                trace_projection=ActionTraceProjection(
+                    origin_refs=(ref,), canonical_payload=canonical
+                ),
+            )
+        if action == "workspace.search":
+            if not workspace.retrieval_policies:
+                raise WorkspaceContractError("Workspace Search is not configured")
+            request = parse_retrieval_request(params, workspace.retrieval_policies[0])
+            if isinstance(request, str):
+                page = await workspace.search(request)
+            else:
+                use_context = any(
+                    isinstance(step, ModelStep)
+                    and step.context is SearchContext.CURRENT
+                    for step in request.steps
+                )
+                inputs = await self._tasks.selection_input(
+                    execution,
+                    include_context=use_context,
+                    control=context.control,
+                )
+                page = await workspace.search(request, inputs=inputs)
+            return _success(
+                execution,
+                page.to_json(),
+                trace_projection=ActionTraceProjection(
+                    origin_refs=tuple(item.ref for item in page.items),
+                    canonical_payload=page.recollection(),
+                ),
+            )
+        if action == "workspace.trash_list":
+            items = await workspace.trash_items()
+            offset, limit = _integer(params, "offset", 0), _integer(params, "limit", 32)
+            if offset < 0 or offset > len(items) or not 1 <= limit <= 64:
+                raise WorkspaceContractError("Workspace Trash page is invalid")
+            return _success(
+                execution,
+                to_json_object(
+                    {
+                        "items": [
+                            {
+                                "ref": item.ref,
+                                "target_ref": item.original.ref,
+                                "tags": list(item.original.tags),
+                            }
+                            for item in items[offset : offset + limit]
+                        ],
+                        "total": len(items),
+                        "next_offset": (
+                            offset + limit if offset + limit < len(items) else None
+                        ),
+                    }
+                ),
+            )
+
+        target = _text(params, "target_ref") if action != "workspace.restore" else ""
+        if action in {"workspace.compose", "workspace.describe"}:
+            return await self._generate(workspace, execution, context, target)
+        context.control.check_cancelled()
+        if action == "workspace.write":
+            record = await workspace.write_text(
+                target,
+                _text(params, "text", allow_empty=True),
+                overwrite=_flag(params, "overwrite"),
+            )
+        elif action == "workspace.edit":
+            values = params.get("edits")
+            if not isinstance(values, list) or not values or len(values) > 64:
+                raise WorkspaceContractError(
+                    "Workspace edit requires a bounded edit list"
+                )
+            edits: list[WorkspaceTextEdit] = []
+            for item in values:
+                if not isinstance(item, dict) or set(item) != {"old_text", "new_text"}:
+                    raise WorkspaceContractError("Workspace edit fields are invalid")
+                edits.append(
+                    WorkspaceTextEdit(
+                        _text(item, "old_text"),
+                        _text(item, "new_text", allow_empty=True),
+                    )
+                )
+            record = await workspace.edit_text(target, edits)
+        elif action == "workspace.append":
+            record = await workspace.append_text(
+                target, _text(params, "text", allow_empty=True)
+            )
+        elif action == "workspace.move":
+            record = await workspace.move(_text(params, "source_ref"), target)
+        elif action == "workspace.mkdir":
+            record = await workspace.mkdir(target)
+        elif action == "workspace.tag":
+            values = params.get("tags")
+            if not isinstance(values, list) or any(
+                not isinstance(tag, str) for tag in values
+            ):
+                raise WorkspaceContractError("Workspace tags are invalid")
+            try:
+                tags = tuple(
+                    WorkspaceTag(tag) for tag in values if isinstance(tag, str)
+                )
+            except ValueError as exc:
+                raise WorkspaceContractError("Unknown Workspace tag") from exc
+            record = await workspace.tag(target, tags)
+        elif action == "workspace.restore":
+            record = await workspace.restore_resource(_text(params, "trash_ref"))
+        elif action == "workspace.delete":
+            item = await workspace.trash_resource(target)
+            return _success(
+                execution, {"trash_ref": item.ref, "ref": item.original.ref}
+            )
+        else:
+            raise WorkspaceContractError("Unknown Workspace action")
+        return _success(execution, _record_payload(record))
+
+    async def _generate(
+        self,
+        workspace: WorkspaceService,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+        target: str,
+    ) -> ActionResult:
+        params, action = execution.call.params, execution.call.action_name
+        instruction = _text(
+            params,
+            "instruction",
+            default="" if action == "workspace.describe" else None,
+        )
+        if len(instruction) > workspace.analysis_settings.max_intent_chars:
+            raise WorkspaceContractError("Workspace instruction exceeds its bound")
+        refs = params.get("references", [])
+        if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs):
+            raise WorkspaceContractError("Workspace references must be refs")
+        if (
+            len(set(refs)) != len(refs)
+            or len(refs) > workspace.analysis_settings.max_reference_refs
+            or target in refs
+        ):
+            raise WorkspaceContractError(
+                "Workspace references must be unique and bounded"
+            )
+        exists = await workspace.write_target_exists(target)
+        overwrite = _flag(params, "overwrite")
+        if action == "workspace.compose" and exists and not overwrite:
+            raise WorkspaceContractError("Workspace create target already exists")
+        resolver = WorkspacePromptReferenceResolver(
+            workspace, runtime_bridge=self._bridge
+        )
+        blocks: list[PromptBlock] = []
+        if exists:
+            if action == "workspace.compose":
+                read = await workspace.read_text(
+                    target, max_chars=workspace.max_write_chars
+                )
+                if read.truncated:
+                    return _failed(
+                        execution,
+                        prompt_text.TARGET_TRUNCATED,
+                        {"reason": "target_truncated", "ref": target},
+                    )
+                blocks.append(
+                    PromptBlock.from_text(
+                        "task_prompt:input:workspace:target", read.text
+                    )
+                )
+            else:
+                blocks.extend(await resolver.resolve_target(target))
+        elif action == "workspace.describe":
+            raise WorkspaceContractError("Workspace description target is absent")
+        for ref in refs:
+            if isinstance(ref, str):
+                blocks.extend(await resolver.resolve_reference(ref))
+        prompt = TaskPrompt(
+            guide_blocks=(
+                PromptBlock.from_text(
+                    "task_prompt:guide:workspace",
+                    prompt_text.RESOURCE_DATA_GUIDE
+                    + (
+                        prompt_text.DESCRIBE_GUIDE
+                        if action == "workspace.describe"
+                        else prompt_text.COMPOSE_GUIDE
+                    ),
+                ),
+            ),
+            input_blocks=(
+                PromptBlock.from_text(
+                    "task_prompt:input:workspace:instruction",
+                    prompt_text.task_input(target=target, instruction=instruction),
+                ),
+                *blocks,
+            ),
+            output_blocks=(
+                PromptBlock.from_text(
+                    "task_prompt:output:workspace",
+                    (
+                        prompt_text.DESCRIBE_EXPECTED_OUTPUT
+                        if action == "workspace.describe"
+                        else prompt_text.compose_expected_output(
+                            max_write_chars=workspace.max_write_chars
+                        )
+                    ),
+                ),
+            ),
+        )
+        context.owner_operations.check_cancelled()
+        context.control.check_cancelled()
+        if action == "workspace.describe":
+            _task_result = await self._llm.run(
+                await self._tasks.create(
+                    execution=execution,
+                    prompt=prompt,
+                    control=context.control,
+                    consumer=f"{execution.call.action_name}.generate",
+                    answer_format=AnswerFormat.JSON_OBJECT,
+                )
+            )
+            value = ActionTaskOutput.json(
+                _task_result, execution, subject="Workspace description"
+            )
+            if isinstance(value, ActionResult):
+                return value
+            description = value.get("description")
+            if (
+                set(value) != {"description"}
+                or not isinstance(description, str)
+                or not description.strip()
+                or len(description) > 2000
+            ):
+                return _failed(
+                    execution,
+                    prompt_text.DESCRIPTION_MUST_BE_NON_EMPTY_BOUNDED_TEXT,
+                    {"reason": "invalid_description"},
+                )
+            context.control.check_cancelled()
+            record = await workspace.set_description(target, description)
+        else:
+            _task_result = await self._llm.run(
+                await self._tasks.create(
+                    execution=execution,
+                    prompt=prompt,
+                    control=context.control,
+                    max_output_chars=workspace.max_write_chars,
+                    consumer=f"{execution.call.action_name}.generate",
+                    answer_format=AnswerFormat.TEXT,
+                )
+            )
+            value = ActionTaskOutput.text(
+                _task_result,
+                execution,
+                subject="Workspace composition",
+                max_chars=workspace.max_write_chars,
+            )
+            if isinstance(value, ActionResult):
+                return value
+            context.control.check_cancelled()
+            record = await workspace.write_text(target, value, overwrite=overwrite)
+        return _success(execution, _record_payload(record))
+
+
+def _text(
+    params: JsonObject,
+    name: str,
+    *,
+    default: str | None = None,
+    allow_empty: bool = False,
+) -> str:
+    value = params.get(name, default)
+    if not isinstance(value, str) or (
+        not allow_empty and default is None and not value
+    ):
+        raise WorkspaceContractError("Workspace text parameter is invalid")
+    return value
+
+
+def _integer(params: JsonObject, name: str, default: int) -> int:
+    value = params.get(name, default)
+    if type(value) is not int:
+        raise WorkspaceContractError("Workspace numeric parameter is invalid")
+    return value
+
+
+def _optional_integer(params: JsonObject, name: str) -> int | None:
+    return _integer(params, name, 0) if name in params else None
+
+
+def _flag(params: JsonObject, name: str) -> bool:
+    value = params.get(name, False)
+    if not isinstance(value, bool):
+        raise WorkspaceContractError("Workspace flag is invalid")
+    return value
+
+
+def _record_payload(record: WorkspaceResourceRecord) -> JsonObject:
+    return {
+        "ref": record.ref,
+        "summary": record.summary,
+        "description": record.description,
+        "tags": [tag.value for tag in record.tags],
+        "kind": record.kind.value,
+        "media_type": record.media_type,
+        "size": record.size,
+        "mtime_ns": record.mtime_ns,
+    }
+
+
+def _text_range_payload(result: WorkspaceTextRangeResult) -> JsonObject:
+    page = result.page
+    return {
+        "ref": result.ref,
+        "size": result.size,
+        "requested": {
+            "start_line": result.start_line,
+            "end_line": result.end_line,
+            "cursor": page.cursor,
+            "max_chars": result.max_chars,
+        },
+        "actual": {
+            "start": _position_payload(page.actual_start),
+            "end": _position_payload(page.actual_end),
+        },
+        "text": page.text,
+        "truncated": page.truncated,
+        "truncation_reason": "character_limit" if page.truncated else "",
+        "next_cursor": page.next_cursor,
+        "next_position": _position_payload(page.next_position),
+        "eof_reached": page.eof_reached,
+    }
+
+
+def _position_payload(position: WorkspaceTextPosition | None) -> JsonObject | None:
+    if position is None:
+        return None
+    return {"line": position.line, "column": position.column}

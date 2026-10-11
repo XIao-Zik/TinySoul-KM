@@ -1,0 +1,22 @@
+name = "home.top.patch"
+domain = "home"
+
+[tool]
+description = "Replace one unique text fragment in a top-level Agent Home entry."
+schema = { type = "object", properties = { ref = { type = "string", description = "Stable home:top/<space>/<name> reference." }, old_text = { type = "string" }, new_text = { type = "string" }, expected_digest = { type = "string" } }, required = ["ref", "old_text", "new_text"], additionalProperties = false }
+
+[semantic]
+use_when = ["A small exact change is needed in a top-level AGENT or skill entry"]
+avoid_when = ["A long-term Memory should change", "The old text is ambiguous"]
+effects = ["modifying"]
+examples = ["Patch one rule in home:top/agent/AGENT"]
+
+[runtime]
+parallel_policy = "serial"
+
+[runtime.hooks]
+normalize = []
+execute = []
+
+[execution]
+executor = "home.top.patch"

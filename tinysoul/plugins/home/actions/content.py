@@ -1,0 +1,667 @@
+"""Agent Home action executors."""
+
+from __future__ import annotations
+
+from tinysoul.infra.continuation import ContinuationError
+from tinysoul.infra.json import JsonObject
+from tinysoul.infra.references import ReferenceError
+from tinysoul.kernel.action import (
+    ActionEngineBuilder,
+    ActionExecution,
+    ActionExecutionContext,
+    ActionExecutor,
+    ActionFailureDisposition,
+    ActionLocalFailure,
+    ActionResult,
+    ActionResultStage,
+    ActionTraceProjection,
+)
+from tinysoul.kernel.action.tasks import ActionTaskFactory
+from tinysoul.kernel.retrieval.contracts import (
+    ModelStep,
+    SearchContext,
+    SearchFailure,
+)
+from tinysoul.kernel.retrieval.operations import SelectionInput
+from tinysoul.kernel.retrieval.requests import parse_retrieval_request
+from tinysoul.plugins.home.runtime_bridge import RuntimeAgentHomeBridge
+from tinysoul.prompts.plugins import home as prompt_text
+from tinysoul.runtime import Signal
+
+from ..background import HOME_CONTEXT_UPDATE
+from ..errors import (
+    AgentHomeContractError,
+    AgentHomeError,
+    AgentHomeInvariantError,
+)
+from ..services import HomeService
+
+
+def register_home_actions(
+    builder: ActionEngineBuilder,
+    *,
+    home: HomeService,
+    runtime_bridge: RuntimeAgentHomeBridge,
+    tasks: ActionTaskFactory | None = None,
+) -> ActionEngineBuilder:
+    """Register Agent Home action executors on an action builder."""
+
+    builder.register_executor(
+        "home.search",
+        HomeSearchExecutor(
+            home,
+            tasks=tasks,
+            runtime_bridge=runtime_bridge,
+        ),
+    )
+    builder.register_executor(
+        "home.inspect",
+        HomeInspectExecutor(home, runtime_bridge=runtime_bridge),
+    )
+    builder.register_executor(
+        "home.resource.write",
+        HomeResourceWriteExecutor(home, runtime_bridge),
+    )
+    builder.register_executor(
+        "home.resource.patch",
+        HomeResourcePatchExecutor(home, runtime_bridge),
+    )
+    builder.register_executor(
+        "home.resource.delete",
+        HomeResourceDeleteExecutor(home, runtime_bridge),
+    )
+    builder.register_executor(
+        "home.top.write",
+        HomeTopWriteExecutor(home, runtime_bridge),
+    )
+    builder.register_executor(
+        "home.top.patch",
+        HomeTopPatchExecutor(home, runtime_bridge),
+    )
+    builder.register_executor(
+        "home.top.delete",
+        HomeTopDeleteExecutor(home, runtime_bridge),
+    )
+    builder.register_executor(
+        "home.prompt_mount.write",
+        HomePromptMountWriteExecutor(home, runtime_bridge),
+    )
+    builder.register_executor(
+        "home.prompt_mount.patch",
+        HomePromptMountPatchExecutor(home, runtime_bridge),
+    )
+    return builder
+
+
+class HomeSearchExecutor(ActionExecutor):
+    def __init__(
+        self,
+        home: HomeService,
+        *,
+        tasks: ActionTaskFactory | None = None,
+        runtime_bridge: RuntimeAgentHomeBridge | None = None,
+    ) -> None:
+        self._home, self._tasks = home, tasks
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self, execution: ActionExecution, context: ActionExecutionContext
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        try:
+            request = parse_retrieval_request(
+                execution.call.params, home.retrieval_policies[0]
+            )
+            inputs = SelectionInput()
+            if not isinstance(request, str) and self._tasks:
+                use_context = any(
+                    isinstance(step, ModelStep)
+                    and step.context is SearchContext.CURRENT
+                    for step in request.steps
+                )
+                inputs = await self._tasks.selection_input(
+                    execution,
+                    include_context=use_context,
+                    control=context.control,
+                )
+            page = await home.search(request, inputs=inputs)
+        except SearchFailure as exc:
+            return _failed(execution, str(exc), reason=exc.kind.value)
+        except AgentHomeContractError as exc:
+            return _failed(execution, str(exc), reason="invalid_search")
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        return ActionResult.success(
+            call_id=execution.call.call_id,
+            invoke_id=execution.framework.invoke_id,
+            batch_id=execution.framework.batch_id,
+            action_name=execution.call.action_name,
+            sequence=execution.call.sequence,
+            domain=execution.framework.domain,
+            payload=page.to_json(),
+            trace_projection=ActionTraceProjection(
+                origin_refs=tuple(item.ref for item in page.items),
+                canonical_payload=page.recollection(),
+            ),
+        )
+
+
+class HomeInspectExecutor(ActionExecutor):
+    def __init__(
+        self, home: HomeService, *, runtime_bridge: RuntimeAgentHomeBridge | None = None
+    ) -> None:
+        self._home = home
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self, execution: ActionExecution, context: ActionExecutionContext
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        params = execution.call.params
+        ref, view = params.get("ref"), params.get("view", "content")
+        continuation, max_chars = params.get("continuation"), params.get("max_chars")
+        if (
+            not isinstance(ref, str)
+            or not isinstance(view, str)
+            or (continuation is not None and not isinstance(continuation, str))
+            or (
+                max_chars is not None and (type(max_chars) is not int or max_chars <= 0)
+            )
+        ):
+            return _failed(
+                execution,
+                prompt_text.INVALID_INSPECT_REQUEST,
+                reason="invalid_inspect",
+            )
+        try:
+            page = await home.inspect(
+                ref, view=view, continuation=continuation, max_chars=max_chars
+            )
+        except (
+            SearchFailure,
+            ContinuationError,
+            AgentHomeContractError,
+            ReferenceError,
+        ) as exc:
+            return _failed(execution, str(exc), reason="invalid_inspect")
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        return ActionResult.success(
+            call_id=execution.call.call_id,
+            invoke_id=execution.framework.invoke_id,
+            batch_id=execution.framework.batch_id,
+            action_name=execution.call.action_name,
+            sequence=execution.call.sequence,
+            domain=execution.framework.domain,
+            payload=page.to_json(),
+            model_text=page.model_text,
+            trace_projection=ActionTraceProjection(
+                origin_refs=(ref,),
+                canonical_payload=page.canonical_payload,
+                model_text=page.recollection_text,
+            ),
+        )
+
+
+class HomeResourceWriteExecutor(ActionExecutor):
+    """Create or replace a progressive resource in the active Home overlay."""
+
+    def __init__(
+        self,
+        home: HomeService,
+        runtime_bridge: RuntimeAgentHomeBridge | None = None,
+    ) -> None:
+        self._home = home
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        ref = execution.call.params.get("ref")
+        text = execution.call.params.get("text")
+        overwrite = execution.call.params.get("overwrite", False)
+        expected_digest = execution.call.params.get("expected_digest", "")
+        if not isinstance(ref, str) or not ref or not isinstance(text, str):
+            return _failed(
+                execution,
+                prompt_text.RESOURCE_WRITE_INPUT_REQUIRED,
+                reason="invalid_parameters",
+            )
+        if not isinstance(overwrite, bool) or not isinstance(expected_digest, str):
+            return _failed(
+                execution,
+                prompt_text.INVALID_RESOURCE_WRITE_PRECONDITIONS,
+                reason="invalid_precondition",
+            )
+        try:
+            result = await home.write_resource(
+                ref,
+                text,
+                overwrite=overwrite,
+                expected_digest=expected_digest,
+            )
+        except AgentHomeContractError:
+            return _failed(
+                execution,
+                prompt_text.RESOURCE_WRITE_REJECTED,
+                reason="resource_write_failed",
+            )
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        return _mutation_success(execution, result)
+
+
+class HomeResourcePatchExecutor(ActionExecutor):
+    """Apply one deterministic exact replacement to the active Home overlay."""
+
+    def __init__(
+        self,
+        home: HomeService,
+        runtime_bridge: RuntimeAgentHomeBridge | None = None,
+    ) -> None:
+        self._home = home
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        ref = execution.call.params.get("ref")
+        old_text = execution.call.params.get("old_text")
+        new_text = execution.call.params.get("new_text")
+        expected_digest = execution.call.params.get("expected_digest", "")
+        if (
+            not isinstance(ref, str)
+            or not ref
+            or not isinstance(old_text, str)
+            or not old_text
+            or not isinstance(new_text, str)
+            or not isinstance(expected_digest, str)
+        ):
+            return _failed(
+                execution,
+                prompt_text.HOME_RESOURCE_PATCH_PARAMETERS_ARE_INVALID,
+                reason="invalid_parameters",
+            )
+        try:
+            result = await home.patch_resource(
+                ref,
+                old_text=old_text,
+                new_text=new_text,
+                expected_digest=expected_digest,
+            )
+        except AgentHomeContractError:
+            return _failed(
+                execution,
+                prompt_text.RESOURCE_PATCH_REJECTED,
+                reason="resource_patch_failed",
+            )
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        return _mutation_success(execution, result)
+
+
+class HomeResourceDeleteExecutor(ActionExecutor):
+    """Tombstone a progressive resource in the active Home overlay."""
+
+    def __init__(
+        self,
+        home: HomeService,
+        runtime_bridge: RuntimeAgentHomeBridge | None = None,
+    ) -> None:
+        self._home = home
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        ref = execution.call.params.get("ref")
+        expected_digest = execution.call.params.get("expected_digest", "")
+        if not isinstance(ref, str) or not ref or not isinstance(expected_digest, str):
+            return _failed(
+                execution,
+                prompt_text.HOME_RESOURCE_DELETE_PARAMETERS_ARE_INVALID,
+                reason="invalid_parameters",
+            )
+        try:
+            result = await home.delete_resource(
+                ref,
+                expected_digest=expected_digest,
+            )
+        except AgentHomeContractError:
+            return _failed(
+                execution,
+                prompt_text.RESOURCE_DELETE_REJECTED,
+                reason="resource_delete_failed",
+            )
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        return _mutation_success(execution, result)
+
+
+class HomeTopWriteExecutor(ActionExecutor):
+    """Create or replace a non-MEMORY top entry in the active overlay."""
+
+    def __init__(
+        self,
+        home: HomeService,
+        runtime_bridge: RuntimeAgentHomeBridge | None = None,
+    ) -> None:
+        self._home = home
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        bus = context.require_signal_bus()
+        ref = execution.call.params.get("ref")
+        text = execution.call.params.get("text")
+        overwrite = execution.call.params.get("overwrite", False)
+        expected_digest = execution.call.params.get("expected_digest", "")
+        if not isinstance(ref, str) or not ref or not isinstance(text, str):
+            return _failed(
+                execution,
+                prompt_text.TOP_WRITE_INPUT_REQUIRED,
+                reason="invalid_parameters",
+            )
+        if not isinstance(overwrite, bool) or not isinstance(expected_digest, str):
+            return _failed(
+                execution,
+                prompt_text.INVALID_TOP_WRITE_PRECONDITIONS,
+                reason="invalid_precondition",
+            )
+        try:
+            result = await home.write_top(
+                ref,
+                text,
+                overwrite=overwrite,
+                expected_digest=expected_digest,
+            )
+        except AgentHomeContractError:
+            return _failed(
+                execution,
+                prompt_text.TOP_WRITE_REJECTED,
+                reason="top_write_failed",
+            )
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        bus.emit(
+            Signal(
+                name=HOME_CONTEXT_UPDATE,
+                source="home.action",
+                scope=execution.framework.scope,
+                payload={"refresh": True},
+            )
+        )
+        return _mutation_success(execution, result)
+
+
+class HomeTopPatchExecutor(ActionExecutor):
+    """Patch one non-MEMORY top entry in the active overlay."""
+
+    def __init__(
+        self,
+        home: HomeService,
+        runtime_bridge: RuntimeAgentHomeBridge | None = None,
+    ) -> None:
+        self._home = home
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        bus = context.require_signal_bus()
+        ref = execution.call.params.get("ref")
+        old_text = execution.call.params.get("old_text")
+        new_text = execution.call.params.get("new_text")
+        expected_digest = execution.call.params.get("expected_digest", "")
+        if (
+            not isinstance(ref, str)
+            or not ref
+            or not isinstance(old_text, str)
+            or not old_text
+            or not isinstance(new_text, str)
+            or not isinstance(expected_digest, str)
+        ):
+            return _failed(
+                execution,
+                prompt_text.HOME_TOP_PATCH_PARAMETERS_ARE_INVALID,
+                reason="invalid_parameters",
+            )
+        try:
+            result = await home.patch_top(
+                ref,
+                old_text=old_text,
+                new_text=new_text,
+                expected_digest=expected_digest,
+            )
+        except AgentHomeContractError:
+            return _failed(
+                execution,
+                prompt_text.TOP_PATCH_REJECTED,
+                reason="top_patch_failed",
+            )
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        bus.emit(
+            Signal(
+                name=HOME_CONTEXT_UPDATE,
+                source="home.action",
+                scope=execution.framework.scope,
+                payload={"refresh": True},
+            )
+        )
+        return _mutation_success(execution, result)
+
+
+class HomeTopDeleteExecutor(ActionExecutor):
+    """Tombstone one non-MEMORY top entry in the active overlay."""
+
+    def __init__(
+        self,
+        home: HomeService,
+        runtime_bridge: RuntimeAgentHomeBridge | None = None,
+    ) -> None:
+        self._home = home
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        bus = context.require_signal_bus()
+        ref = execution.call.params.get("ref")
+        expected_digest = execution.call.params.get("expected_digest", "")
+        if not isinstance(ref, str) or not ref or not isinstance(expected_digest, str):
+            return _failed(
+                execution,
+                prompt_text.HOME_TOP_DELETE_PARAMETERS_ARE_INVALID,
+                reason="invalid_parameters",
+            )
+        try:
+            result = await home.delete_top(ref, expected_digest=expected_digest)
+        except AgentHomeContractError:
+            return _failed(
+                execution,
+                prompt_text.TOP_DELETE_REJECTED,
+                reason="top_delete_failed",
+            )
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        bus.emit(
+            Signal(
+                name=HOME_CONTEXT_UPDATE,
+                source="home.action",
+                scope=execution.framework.scope,
+                payload={"refresh": True},
+            )
+        )
+        return _mutation_success(execution, result)
+
+
+class HomePromptMountWriteExecutor(ActionExecutor):
+    """Create or replace one catalog-defined prompt mount."""
+
+    def __init__(
+        self,
+        home: HomeService,
+        runtime_bridge: RuntimeAgentHomeBridge | None = None,
+    ) -> None:
+        self._home = home
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        ref = execution.call.params.get("ref")
+        text = execution.call.params.get("text")
+        overwrite = execution.call.params.get("overwrite", False)
+        expected_digest = execution.call.params.get("expected_digest", "")
+        if not isinstance(ref, str) or not ref or not isinstance(text, str):
+            return _failed(
+                execution,
+                prompt_text.PROMPT_MOUNT_WRITE_INPUT_REQUIRED,
+                reason="invalid_parameters",
+            )
+        if not isinstance(overwrite, bool) or not isinstance(expected_digest, str):
+            return _failed(
+                execution,
+                prompt_text.INVALID_PROMPT_MOUNT_WRITE_PRECONDITIONS,
+                reason="invalid_precondition",
+            )
+        try:
+            result = await home.write_prompt_mount(
+                ref,
+                text,
+                overwrite=overwrite,
+                expected_digest=expected_digest,
+            )
+        except AgentHomeContractError:
+            return _failed(
+                execution,
+                prompt_text.PROMPT_MOUNT_WRITE_REJECTED,
+                reason="prompt_mount_write_failed",
+            )
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        return _mutation_success(execution, result)
+
+
+class HomePromptMountPatchExecutor(ActionExecutor):
+    """Patch one catalog-defined prompt mount."""
+
+    def __init__(
+        self,
+        home: HomeService,
+        runtime_bridge: RuntimeAgentHomeBridge | None = None,
+    ) -> None:
+        self._home = home
+        self._runtime_bridge = runtime_bridge or RuntimeAgentHomeBridge()
+
+    async def execute(
+        self,
+        execution: ActionExecution,
+        context: ActionExecutionContext,
+    ) -> ActionResult:
+        home = self._home.using(context.owner_operations)
+        ref = execution.call.params.get("ref")
+        old_text = execution.call.params.get("old_text")
+        new_text = execution.call.params.get("new_text")
+        expected_digest = execution.call.params.get("expected_digest", "")
+        if (
+            not isinstance(ref, str)
+            or not ref
+            or not isinstance(old_text, str)
+            or not old_text
+            or not isinstance(new_text, str)
+            or not isinstance(expected_digest, str)
+        ):
+            return _failed(
+                execution,
+                prompt_text.HOME_PROMPT_MOUNT_PATCH_PARAMETERS_ARE_INVALID,
+                reason="invalid_parameters",
+            )
+        try:
+            result = await home.patch_prompt_mount(
+                ref,
+                old_text=old_text,
+                new_text=new_text,
+                expected_digest=expected_digest,
+            )
+        except AgentHomeContractError:
+            return _failed(
+                execution,
+                prompt_text.PROMPT_MOUNT_PATCH_REJECTED,
+                reason="prompt_mount_patch_failed",
+            )
+        except AgentHomeError as exc:
+            raise self._runtime_bridge.from_home_error(exc) from exc
+        return _mutation_success(execution, result)
+
+
+def _mutation_success(execution: ActionExecution, result: object) -> ActionResult:
+    from ..engine import HomeResourceMutation
+
+    if not isinstance(result, HomeResourceMutation):
+        raise AgentHomeInvariantError(
+            "Home mutation executor received an invalid result"
+        )
+    return ActionResult.success(
+        call_id=execution.call.call_id,
+        invoke_id=execution.framework.invoke_id,
+        batch_id=execution.framework.batch_id,
+        action_name=execution.call.action_name,
+        sequence=execution.call.sequence,
+        domain=execution.framework.domain,
+        payload={
+            "ref": result.ref,
+            "state": result.state.value,
+            "digest": result.digest,
+            "baseline_digest": result.baseline_digest,
+            "size": result.size,
+        },
+    )
+
+
+def _failed(
+    execution: ActionExecution,
+    model_feedback: str,
+    *,
+    reason: str,
+    frame_data: JsonObject | None = None,
+) -> ActionResult:
+    return ActionResult.failed(
+        call_id=execution.call.call_id,
+        invoke_id=execution.framework.invoke_id,
+        batch_id=execution.framework.batch_id,
+        action_name=execution.call.action_name,
+        stage=ActionResultStage.EXECUTE,
+        sequence=execution.call.sequence,
+        domain=execution.framework.domain,
+        failure=ActionLocalFailure(
+            reason=reason,
+            scope="home.action",
+            disposition=ActionFailureDisposition.CHANGE_REQUEST,
+            feedback=model_feedback,
+        ),
+        frame_data=frame_data,
+    )

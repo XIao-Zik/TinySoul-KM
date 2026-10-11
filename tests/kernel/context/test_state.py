@@ -1,0 +1,422 @@
+"""Tests for context state holders."""
+
+from __future__ import annotations
+
+
+from dataclasses import replace
+import pytest
+
+from tinysoul.kernel.action.call import (
+    ActionCall,
+    ActionFramework,
+    ExecutionFact,
+    ExecutionState,
+)
+from tinysoul.kernel.action.result import ActionResult
+
+from tinysoul.kernel.context.background import (
+    BackgroundContext,
+    BackgroundEntry,
+    BackgroundPatch,
+    BackgroundSource,
+    background_projection,
+)
+from tinysoul.kernel.context.errors import ContextContractError, ContextInvariantError
+from tinysoul.kernel.context.builtin.trace import (
+    PendingInputs,
+    TraceKind,
+    TurnTraceHeap,
+    parse_trace_reference,
+)
+from tinysoul.kernel.context.builtin.working import (
+    Milestone,
+    TodoItem,
+    TodoStatus,
+    WorkingContext,
+    WorkingPatch,
+)
+from tinysoul.llm.protocol.messages import (
+    AssistantMessage,
+    JsonPart,
+    TextPart,
+    ToolResultMessage,
+    UserMessage,
+)
+from tinysoul.runtime import CyclePhase, RunScope
+
+
+def test_trace_keeps_cycle_order_and_finalizes_unstarted_calls() -> None:
+    trace = TurnTraceHeap(turn_id="2026-10-06/1001")
+    first = ActionCall(
+        call_id="reused", action_name="test.write", params={}, sequence=2
+    )
+    second = replace(first, action_name="test.read", sequence=1)
+    trace.register_action_calls((first,), cycle_id="cycle_1")
+    trace.register_action_calls((second,), cycle_id="cycle_2")
+    framework = ActionFramework(
+        invoke_id="invoke_1",
+        batch_id="batch_1",
+        scope=RunScope(),
+        domain="test",
+        turn_id="2026-10-06/1001",
+        cycle_id="cycle_1",
+    )
+    for state in (ExecutionState.REQUESTED, ExecutionState.STARTED):
+        trace.record_execution(
+            ExecutionFact(call=first, framework=framework, state=state)
+        )
+    result = ActionResult.success(
+        call_id=first.call_id,
+        invoke_id="invoke_1",
+        batch_id="batch_1",
+        action_name=first.action_name,
+        sequence=2,
+        domain="test",
+        payload={"written": True},
+    )
+    fact = ExecutionFact(
+        call=first, framework=framework, state=ExecutionState.SETTLED, result=result
+    )
+    trace.record_execution(fact)
+    trace.record_execution(fact)
+    sealed = trace.seal()
+    assert [item.cycle_id for item in sealed.actions] == ["cycle_1", "cycle_2"]
+    assert [item.state for item in sealed.actions] == [
+        ExecutionState.SETTLED,
+        ExecutionState.NOT_EXECUTED,
+    ]
+    with pytest.raises(ContextInvariantError):
+        trace.record_execution(replace(fact, state=ExecutionState.UNKNOWN, result=None))
+
+
+def test_trace_rejects_identity_changes_and_sealing_live_execution() -> None:
+    trace = TurnTraceHeap(turn_id="2026-10-06/1001")
+    call = ActionCall(call_id="call_1", action_name="test.write", params={}, sequence=1)
+    trace.register_action_calls((call,), cycle_id="cycle_1")
+    framework = ActionFramework(
+        invoke_id="invoke_1",
+        batch_id="batch_1",
+        scope=RunScope(),
+        domain="test",
+        turn_id="2026-10-06/1001",
+        cycle_id="cycle_1",
+    )
+    started = ExecutionFact(
+        call=call, framework=framework, state=ExecutionState.STARTED
+    )
+    trace.record_execution(started)
+    with pytest.raises(ContextInvariantError):
+        trace.seal()
+    with pytest.raises(ContextInvariantError):
+        trace.record_execution(
+            replace(started, framework=replace(framework, invoke_id="other"))
+        )
+
+
+def test_background_load_evict_and_render() -> None:
+    background = BackgroundContext(journal="today so far")
+    background.load(
+        BackgroundEntry(
+            ref="home:top/skills/tinysoul",
+            content="TinySoul is an agent.",
+        )
+    )
+    assert background.has("home:top/skills/tinysoul")
+    messages = background.render_messages()
+    assert isinstance(messages[0], UserMessage)
+    assert messages[0].label == "background:journal"
+    assert messages[1].label == "background:home:top/skills/tinysoul"
+
+    background.evict("home:top/skills/tinysoul")
+    assert not background.has("home:top/skills/tinysoul")
+    with pytest.raises(ContextContractError):
+        background.evict("home:top/skills/tinysoul")
+
+
+def test_background_projection_distinguishes_missing_from_empty_snapshot() -> None:
+    assert (
+        background_projection({"home": {"loaded_refs": ["home:top/skills/old"]}})
+        is None
+    )
+    assert background_projection({"home": {"background_entries": []}}) == ()
+
+
+def test_background_load_replaces_same_link() -> None:
+    background = BackgroundContext()
+    background.load(BackgroundEntry(ref="home:top/skills/q", content="old"))
+    background.load(
+        BackgroundEntry(
+            ref="home:top/skills/q",
+            content="new",
+            source=BackgroundSource.PHASE1,
+        )
+    )
+    entries = background.entries()
+    assert len(entries) == 1
+    assert entries[0].content == "new"
+    assert entries[0].source is BackgroundSource.PHASE1
+
+
+def test_background_patch_sequence_validates_projected_loaded_links() -> None:
+    background = BackgroundContext()
+    problems = background.check_patch_sequence(
+        (
+            BackgroundPatch(load_refs=("home:top/skills/x",)),
+            BackgroundPatch(evict_refs=("home:top/skills/x",)),
+            BackgroundPatch(evict_refs=("home:top/skills/x",)),
+        ),
+        loadable_refs=("home:top/skills/x",),
+        evictable_refs=("home:top/skills/x",),
+    )
+
+    assert problems[0] == ""
+    assert problems[1] == ""
+    assert "not loaded" in problems[2]
+
+
+def test_background_patch_rejects_load_evict_conflict() -> None:
+    background = BackgroundContext()
+    problem = background.check_patch(
+        BackgroundPatch(
+            load_refs=("home:top/skills/x",),
+            evict_refs=("home:top/skills/x",),
+        ),
+        loadable_refs=("home:top/skills/x",),
+        evictable_refs=("home:top/skills/x",),
+    )
+
+    assert "cannot load and evict" in problem
+
+
+def test_background_patch_rejects_duplicate_links() -> None:
+    background = BackgroundContext()
+    problem = background.check_patch(
+        BackgroundPatch(load_refs=("home:top/skills/x", "home:top/skills/x")),
+        loadable_refs=("home:top/skills/x",),
+        evictable_refs=("home:top/skills/x",),
+    )
+
+    assert "duplicate load ref" in problem
+
+
+def test_working_patch_check_and_apply() -> None:
+    working = WorkingContext()
+    patch = WorkingPatch(
+        set_milestones=(Milestone(key="goal", content="ship context module"),),
+        set_todos=(TodoItem(key="t1", content="write tests"),),
+    )
+    assert working.check_patch(patch) == ""
+    working.apply_patch(patch)
+    assert working.milestones()[0].content == "ship context module"
+    assert working.todos()[0].status is TodoStatus.PENDING
+
+    removal = WorkingPatch(remove_todos=("t1",))
+    working.apply_patch(removal)
+    assert working.todos() == ()
+
+    bad = WorkingPatch(remove_milestones=("missing",))
+    assert "Unknown milestone key" in working.check_patch(bad)
+    assert "no operations" in working.check_patch(WorkingPatch())
+
+
+def test_working_patch_rejects_conflicting_and_duplicate_operations() -> None:
+    working = WorkingContext()
+    conflict = WorkingPatch(
+        set_todos=(TodoItem(key="t1", content="write"),),
+        remove_todos=("t1",),
+    )
+    duplicate = WorkingPatch(remove_todos=("t1", "t1"))
+
+    assert "cannot set and remove" in working.check_patch(conflict)
+    assert "duplicate todo remove key" in working.check_patch(duplicate)
+
+
+def test_working_message_hides_internal_revisions_without_changing_state() -> None:
+    working = WorkingContext()
+    trace = TurnTraceHeap(turn_id="2026-10-06/1002")
+    trace.append_phase_note("observed")
+
+    message = working.render_messages()[0]
+    part = message.parts[0]
+
+    assert isinstance(part, JsonPart)
+    assert "as_of_trace" not in part.value
+    assert "workspace_revision" not in part.value
+    assert "as_of_trace" not in working.to_json()
+    assert set(working.to_json()) == {"milestones", "todos"}
+
+
+def test_working_patch_sequence_validates_projected_state() -> None:
+    working = WorkingContext()
+    problems = working.check_patch_sequence(
+        (
+            WorkingPatch(set_todos=(TodoItem(key="t1", content="write"),)),
+            WorkingPatch(remove_todos=("t1",)),
+            WorkingPatch(remove_todos=("t1",)),
+        )
+    )
+
+    assert problems[0] == ""
+    assert problems[1] == ""
+    assert "Unknown todo key" in problems[2]
+
+
+def test_trace_appends_and_render_order() -> None:
+    trace = TurnTraceHeap(turn_id="2026-10-06/261")
+    trace.append_decision(
+        AssistantMessage.from_text("thinking"),
+        cycle_id="c1",
+        phase=CyclePhase.PHASE2,
+    )
+    trace.append_action_result(
+        ToolResultMessage.from_json(
+            call_id="call_1",
+            tool_name="core.answer",
+            value={"status": "success"},
+        ),
+        cycle_id="c1",
+    )
+    trace.append_phase_note({"feedback": "scope failed"}, cycle_id="c1")
+    kinds = [entry.kind for entry in trace.entries()]
+    assert kinds == [
+        TraceKind.DECISION,
+        TraceKind.ACTION_RESULT,
+        TraceKind.PHASE_NOTE,
+    ]
+    assert len(trace.render_messages()) == 3
+
+
+def test_trace_compaction_keeps_canonical_entries_and_exposes_heap_head() -> None:
+    trace = TurnTraceHeap(turn_id="2026-10-06/286", min_hot_entries=2)
+    for index in range(6):
+        trace.append_phase_note(f"note {index}")
+    report = trace.compact(required_chars=1)
+    assert report.changed is True
+    assert report.compacted_count == 4
+    assert len(trace.entries()) == 6
+    assert len(trace.hot_entries()) == 2
+    assert trace.render_messages()[0].label == "trace_heap_head"
+
+    again = trace.compact(required_chars=1)
+    assert again.changed is False
+    assert again.compacted_count == 0
+
+
+def test_trace_compaction_builds_inspectable_leaf_nodes() -> None:
+    trace = TurnTraceHeap(turn_id="2026-10-06/1005", min_hot_entries=1)
+    for index in range(4):
+        trace.append_phase_note(f"note {index}")
+    report = trace.compact(required_chars=1)
+    assert report.compacted_count == 3
+    model_header = trace.render_messages()[0].parts[0]
+    assert isinstance(model_header, TextPart)
+    assert "canonical_revision" not in model_header.text
+    head = trace.inspect(trace.head_ref())
+    assert trace.head_ref() in model_header.text
+    nodes = head["nodes"]
+    assert isinstance(nodes, list)
+    assert nodes
+    root = nodes[0]
+    assert isinstance(root, dict)
+    ref = root["ref"]
+    assert isinstance(ref, str)
+    assert trace.inspect(ref) == {"kind": "context_trace_leaf", "ref": ref}
+    assert ref in model_header.text and "note 0" in model_header.text
+    assert [entry.kind for entry in trace.leaf_entries(ref)] == [
+        TraceKind.PHASE_NOTE
+    ] * 3
+
+
+def test_trace_owner_resolves_head_compact_and_fact_identities() -> None:
+    trace = TurnTraceHeap(turn_id="2026-10-06/1003", min_hot_entries=0)
+    entry = trace.append_phase_note("note")
+    assert parse_trace_reference(trace.head_ref()) == "2026-10-06/1003"
+    assert trace.resolve_reference(trace.head_ref()) == trace.head_ref()
+    assert trace.resolve_reference(trace.entry_ref(entry.entry_id)) == trace.entry_ref(
+        entry.entry_id
+    )
+    assert trace.resolve_reference(trace.input_ref(0)) == trace.input_ref(0)
+    trace.compact(required_chars=1)
+    nodes = trace.inspect(trace.head_ref())["nodes"]
+    assert isinstance(nodes, list) and nodes
+    node = nodes[0]
+    assert isinstance(node, dict)
+    node_ref = node["ref"]
+    assert isinstance(node_ref, str)
+    assert trace.resolve_reference(node_ref) == node_ref
+
+
+def test_trace_leaf_keeps_immutable_interaction_order() -> None:
+    trace = TurnTraceHeap(turn_id="2026-10-06/1004", min_hot_entries=0)
+    for index in range(4):
+        trace.append_phase_note(f"note {index}" + "x" * 30)
+    trace.compact(required_chars=1)
+    head = trace.inspect(trace.head_ref())
+    nodes = head["nodes"]
+    assert isinstance(nodes, list)
+    root = nodes[0]
+    assert isinstance(root, dict)
+    ref = root["ref"]
+    assert isinstance(ref, str)
+
+    entries = trace.leaf_entries(ref)
+    assert len(entries) == 4
+    assert [entry.kind for entry in entries] == [TraceKind.PHASE_NOTE] * 4
+
+
+def test_trace_compaction_does_not_split_cycle_at_hot_boundary() -> None:
+    trace = TurnTraceHeap(turn_id="2026-10-06/365", min_hot_entries=2)
+    for index in range(3):
+        trace.append_phase_note(f"cycle one {index}", cycle_id="cycle_1")
+    trace.append_phase_note("cycle two", cycle_id="cycle_2")
+
+    report = trace.compact(required_chars=1)
+
+    assert report.changed is False
+    assert report.compacted_count == 0
+    assert len(trace.hot_entries()) == 4
+
+
+def test_trace_inspect_overlay_folds_back_to_origin_pointer() -> None:
+    trace = TurnTraceHeap(turn_id="2026-10-06/378")
+    full = ToolResultMessage.from_json(
+        call_id="recall_1",
+        tool_name="core.session.inspect",
+        value={"detail": "x" * 200},
+    )
+    compact = ToolResultMessage.from_json(
+        call_id="recall_1",
+        tool_name="core.session.inspect",
+        value={"origin_ref": "session:turn/2026-10-06/1000", "folded": True},
+    )
+    trace.append_action_result(
+        full,
+        canonical_message=compact,
+        origin_refs=("session:turn/2026-10-06/1000",),
+    )
+
+    assert trace.render_messages()[0] == full
+    assert trace.compact(required_chars=0).folded_overlay_count == 0
+    trace.mark_consumed(trace.render_messages())
+    report = trace.compact(required_chars=0)
+    assert report.folded_overlay_count == 1
+    assert trace.render_messages()[0] == compact
+    assert trace.entries()[0].origin_refs == ("session:turn/2026-10-06/1000",)
+
+
+def test_pending_inputs_merge_lifecycle() -> None:
+    inputs = PendingInputs()
+    first = inputs.add("initial", merged=True)
+    second = inputs.add("appended")
+    assert [item.input_id for item in inputs.unmerged()] == [second.input_id]
+
+    inputs.mark_merged((second.input_id,))
+    assert inputs.unmerged() == ()
+    assert len(inputs.all()) == 2
+    assert first.merged is True
+    rendered = inputs.render_messages()
+    assert [message.label for message in rendered] == ["user_input", "user_input"]
+    assert all(isinstance(message, UserMessage) for message in rendered)
+
+    with pytest.raises(ContextContractError):
+        inputs.mark_merged(("missing",))

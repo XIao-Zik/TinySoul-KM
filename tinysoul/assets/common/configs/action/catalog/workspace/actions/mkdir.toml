@@ -1,0 +1,24 @@
+name = "workspace.mkdir"
+domain = "workspace"
+
+[tool]
+description = "Create a Workspace directory, rejecting an existing target."
+
+[tool.schema]
+type = "object"
+required = ["target_ref"]
+additionalProperties = false
+
+[tool.schema.properties]
+
+[tool.schema.properties.target_ref]
+type = "string"
+
+[semantic]
+effects = ["modifying"]
+
+[runtime]
+parallel_policy = "serial"
+
+[execution]
+executor = "workspace.mkdir"

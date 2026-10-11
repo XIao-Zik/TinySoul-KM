@@ -1,0 +1,43 @@
+[llm.models.deepseek_pro]
+family = "deepseek"
+collapsed = false
+adapter = "deepseek"
+providers = [
+  { provider = "orca", provider_model = "deepseek/deepseek-v4-pro" },
+  { provider = "deepseek", provider_model = "deepseek-v4-pro" },
+]
+context_window_tokens = 1000000
+capabilities = [
+  "text_input",
+  "json_object_output",
+  "reasoning_output",
+  "tool_calling",
+]
+
+[llm.models.deepseek_pro.adapter_options]
+thinking = "enabled"
+reasoning_effort = "high"
+reasoning_keep = "content"
+
+[llm.models.deepseek_flash]
+family = "deepseek"
+collapsed = false
+adapter = "deepseek"
+providers = [
+  { provider = "orca", provider_model = "deepseek/deepseek-v4-flash-vision-exp" },
+  { provider = "deepseek", provider_model = "deepseek-flash" },
+]
+context_window_tokens = 1000000
+capabilities = [
+  "text_input",
+  "image_input",
+  "image_remote_url",
+  "json_object_output",
+  "reasoning_output",
+  "tool_calling",
+]
+
+[llm.models.deepseek_flash.adapter_options]
+thinking = "enabled"
+reasoning_effort = "high"
+reasoning_keep = "content"

@@ -1,0 +1,22 @@
+name = "home.top.write"
+domain = "home"
+
+[tool]
+description = "Create or replace one top-level entry in the active Agent Home overlay."
+schema = { type = "object", properties = { ref = { type = "string", description = "Canonical home:top/<space>/<name> reference; top names have no file extension." }, text = { type = "string", description = "Complete UTF-8 text content." }, overwrite = { type = "boolean", description = "Whether an existing effective entry may be replaced." }, expected_digest = { type = "string", description = "Optional current effective digest precondition." } }, required = ["ref", "text"], additionalProperties = false }
+
+[semantic]
+use_when = ["A top-level AGENT or skill entry should be created or fully replaced"]
+avoid_when = ["A progressive resource or automatic prompt mount should change", "A long-term Memory should change"]
+effects = ["modifying"]
+examples = ["Create home:top/skills/refactor"]
+
+[runtime]
+parallel_policy = "serial"
+
+[runtime.hooks]
+normalize = []
+execute = []
+
+[execution]
+executor = "home.top.write"

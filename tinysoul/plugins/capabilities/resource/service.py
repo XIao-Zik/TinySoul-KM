@@ -1,0 +1,470 @@
+"""Resource conversion orchestration across worker and Workspace boundaries."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+import json
+from pathlib import Path, PurePosixPath
+import sys
+from typing import cast
+
+from tinysoul.kernel.action.backends import (
+    ControlledProcessRunner,
+    ProcessRequest,
+    ProcessStatus,
+)
+from tinysoul.kernel.action import ActionExecutionControl
+from tinysoul.infra import (
+    FilesystemBoundaryError,
+    JsonObject,
+    StagingDirectoryManager,
+    dumps_json,
+    resolve_under_root,
+    to_json_object,
+)
+from tinysoul.plugins.workspace import (
+    WorkspaceBundleWrite,
+    WorkspaceRef,
+)
+
+from tinysoul.plugins.workspace.services import WorkspaceService
+from tinysoul.infra.concurrency import JoinedOperations
+from .config import ResourceSettings
+from .errors import (
+    ResourceContractError,
+    ResourceProcessingError,
+    ResourceProcessTimeout,
+    ResourceWorkerProtocolError,
+)
+from .models import (
+    ResourceContentStatus,
+    ResourceConversionResult,
+    ResourceConverter,
+)
+
+_MAX_WORKER_STDOUT = 64_000
+_MAX_WORKER_STDERR = 8_000
+_MAX_RESULT_REFS = 16
+_MAX_WARNINGS = 20
+
+
+@dataclass(frozen=True)
+class _WorkerAsset:
+    file: str
+    ref: str
+    size: int
+
+
+@dataclass(frozen=True)
+class _WorkerResult:
+    markdown_file: str
+    assets: tuple[_WorkerAsset, ...]
+    content_status: ResourceContentStatus
+    visual_refs: tuple[str, ...]
+    warning_codes: tuple[str, ...]
+
+
+class ResourceConversionService:
+    """Convert one Workspace document through a fixed local worker."""
+
+    def __init__(
+        self,
+        *,
+        workspace: WorkspaceService,
+        settings: ResourceSettings,
+        staging: StagingDirectoryManager,
+        process_runner: ControlledProcessRunner | None = None,
+    ) -> None:
+        self._workspace = workspace
+        self._settings = settings
+        self._staging = staging
+        self._process_runner = process_runner or ControlledProcessRunner()
+
+    async def convert(
+        self,
+        *,
+        converter: ResourceConverter,
+        source_ref: str,
+        target_ref: str,
+        overwrite: bool,
+        control: ActionExecutionControl,
+        operations: JoinedOperations | None = None,
+    ) -> ResourceConversionResult:
+
+        operations = operations or JoinedOperations()
+        workspace = self._workspace.using(operations)
+        self._validate_params(
+            source_ref=source_ref,
+            target_ref=target_ref,
+            overwrite=overwrite,
+        )
+        _require_active(control)
+        source = await workspace.read_document(
+            source_ref,
+            max_bytes=self._settings.max_source_bytes,
+        )
+        self._validate_converter_source(converter, source.suffix)
+        target = WorkspaceRef.parse(target_ref)
+        if target.path.suffix.lower() != ".md":
+            raise ResourceContractError("Resource conversion target must end with .md")
+        if source.ref == str(target):
+            raise ResourceContractError("Resource source and target refs must differ")
+        asset_prefix = _asset_prefix(target)
+        if source.ref.startswith(asset_prefix + "/"):
+            raise ResourceContractError(
+                "Resource source cannot be owned by the target asset bundle"
+            )
+        current_assets = tuple(
+            record.ref
+            for record in (await workspace.snapshot()).resources
+            if record.ref.startswith(asset_prefix + "/")
+        )
+        if current_assets and not overwrite:
+            raise ResourceProcessingError(
+                "Resource conversion asset target already exists",
+                reason="target_exists",
+                payload={"target_ref": target_ref},
+            )
+
+        async with self._staging.allocate_async("resource", operations) as root:
+            source_path = root / f"source{source.suffix}"
+            output_path = root / "output"
+            await operations.run(lambda: source_path.write_bytes(source.data))
+            request = self._worker_request(
+                converter=converter,
+                source_path=source_path,
+                source_suffix=source.suffix,
+                output_path=output_path,
+                asset_prefix=asset_prefix,
+            )
+            outcome = await operations.run(
+                lambda: self._process_runner.run(
+                    ProcessRequest(
+                        argv=(
+                            sys.executable,
+                            "-m",
+                            "tinysoul.plugins.capabilities.resource.worker",
+                        ),
+                        stdin_text=dumps_json(request),
+                        stdout_limit=_MAX_WORKER_STDOUT,
+                        stderr_limit=_MAX_WORKER_STDERR,
+                    ),
+                    control,
+                )
+            )
+            if outcome.status is ProcessStatus.TIMED_OUT:
+                raise ResourceProcessTimeout(
+                    "Resource conversion worker timed out",
+                    reason="process_timeout",
+                )
+            if outcome.status is ProcessStatus.CANCELLED:
+                raise ResourceProcessTimeout(
+                    "Resource conversion worker was cancelled",
+                    reason=control.cancel_reason or "cancelled",
+                )
+            if outcome.status is ProcessStatus.START_FAILED:
+                raise ResourceProcessingError(
+                    "Resource conversion worker failed to start",
+                    reason="process_start_failed",
+                    payload={"error_type": outcome.error_type},
+                )
+            _require_active(control)
+            response = _worker_response(outcome.stdout)
+            if outcome.exit_code != 0 or not _required_bool(response, "ok"):
+                reason = _optional_string(response, "reason") or "worker_failed"
+                raise ResourceProcessingError(
+                    _optional_string(response, "message")
+                    or "Resource conversion worker failed",
+                    reason=reason,
+                    payload={"converter": converter.value},
+                )
+            worker = _parse_worker_result(
+                response,
+                output_path=output_path,
+                asset_prefix=asset_prefix,
+                settings=self._settings,
+            )
+            writes = await operations.run(
+                lambda: self._bundle_writes(
+                    worker,
+                    output_path=output_path,
+                    target_ref=str(target),
+                    overwrite=overwrite,
+                )
+            )
+            new_refs = {item.ref for item in writes[1:]}
+            stale_assets = (
+                tuple(ref for ref in current_assets if ref not in new_refs)
+                if overwrite
+                else ()
+            )
+            _require_active(control)
+            committed = await workspace.write_bundle(
+                writes,
+                delete_refs=stale_assets,
+            )
+
+        return ResourceConversionResult(
+            source_ref=source.ref,
+            markdown_ref=str(target),
+            converter=converter,
+            content_status=worker.content_status,
+            manifest=committed.manifest,
+            records=committed.records,
+            visual_refs=worker.visual_refs,
+            warning_codes=worker.warning_codes,
+        )
+
+    def _worker_request(
+        self,
+        *,
+        converter: ResourceConverter,
+        source_path: Path,
+        source_suffix: str,
+        output_path: Path,
+        asset_prefix: str,
+    ) -> JsonObject:
+        action_settings = (
+            self._settings.convert_with_markitdown
+            if converter is ResourceConverter.MARKITDOWN
+            else self._settings.convert_with_pypdf
+        )
+        return {
+            "converter": converter.value,
+            "source_path": str(source_path),
+            "source_suffix": source_suffix,
+            "output_path": str(output_path),
+            "asset_ref_prefix": asset_prefix,
+            "max_output_chars": self._settings.max_output_chars,
+            "max_assets": self._settings.max_assets,
+            "max_total_asset_bytes": self._settings.max_total_asset_bytes,
+            "max_pdf_pages": self._settings.max_pdf_pages,
+            "render_pdf_pages": self._settings.render_pdf_pages.value,
+            "extract_images": action_settings.extract_images,
+            "extract_attachments": action_settings.extract_attachments,
+        }
+
+    def _bundle_writes(
+        self,
+        worker: _WorkerResult,
+        *,
+        output_path: Path,
+        target_ref: str,
+        overwrite: bool,
+    ) -> tuple[WorkspaceBundleWrite, ...]:
+        markdown_path = _worker_path(output_path, worker.markdown_file)
+        try:
+            markdown = markdown_path.read_bytes()
+        except OSError as exc:
+            raise ResourceWorkerProtocolError(
+                "Worker Markdown output is unreadable"
+            ) from exc
+        try:
+            text = markdown.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ResourceWorkerProtocolError(
+                "Worker Markdown output is not UTF-8"
+            ) from exc
+        if not text.strip() or len(text) > self._settings.max_output_chars:
+            raise ResourceWorkerProtocolError("Worker Markdown output violates limits")
+        writes = [
+            WorkspaceBundleWrite(
+                ref=target_ref,
+                data=markdown,
+                overwrite=overwrite,
+            )
+        ]
+        total_asset_bytes = 0
+        for asset in worker.assets:
+            path = _worker_path(output_path, asset.file)
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                raise ResourceWorkerProtocolError("Worker asset is unreadable") from exc
+            if len(data) != asset.size:
+                raise ResourceWorkerProtocolError(
+                    "Worker asset size does not match manifest"
+                )
+            total_asset_bytes += len(data)
+            if total_asset_bytes > self._settings.max_total_asset_bytes:
+                raise ResourceWorkerProtocolError(
+                    "Worker assets exceed configured byte limit"
+                )
+            writes.append(
+                WorkspaceBundleWrite(
+                    ref=asset.ref,
+                    data=data,
+                    overwrite=overwrite,
+                )
+            )
+        return tuple(writes)
+
+    def _validate_converter_source(
+        self,
+        converter: ResourceConverter,
+        suffix: str,
+    ) -> None:
+        normalized = suffix.removeprefix(".").lower()
+        if converter is ResourceConverter.PYPDF and normalized != "pdf":
+            raise ResourceProcessingError(
+                "pypdf conversion only accepts PDF documents",
+                reason="unsupported_format",
+                payload={"suffix": suffix},
+            )
+        if (
+            converter is ResourceConverter.MARKITDOWN
+            and normalized not in self._settings.convert_with_markitdown.formats
+        ):
+            raise ResourceProcessingError(
+                "MarkItDown format is disabled or unsupported",
+                reason="unsupported_format",
+                payload={"suffix": suffix},
+            )
+
+    @staticmethod
+    def _validate_params(
+        *,
+        source_ref: str,
+        target_ref: str,
+        overwrite: bool,
+    ) -> None:
+        WorkspaceRef.parse(source_ref)
+        WorkspaceRef.parse(target_ref)
+        if not isinstance(overwrite, bool):
+            raise ResourceContractError("Resource overwrite must be boolean")
+
+
+def _asset_prefix(target: WorkspaceRef) -> str:
+    path = target.path
+    stem = path.stem
+    parent = path.parent
+    relative = PurePosixPath(f"{stem}.assets")
+    if str(parent) != ".":
+        relative = parent / relative
+    return str(WorkspaceRef.from_relative_path(relative.as_posix()))
+
+
+def _require_active(control: ActionExecutionControl) -> None:
+    if control.is_cancelled():
+        raise ResourceProcessTimeout(
+            "Resource conversion was cancelled before Workspace commit",
+            reason=control.cancel_reason or "cancelled",
+        )
+    if control.is_expired():
+        raise ResourceProcessTimeout(
+            "Resource conversion deadline expired before Workspace commit",
+            reason="deadline_expired",
+        )
+
+
+def _worker_response(value: str) -> JsonObject:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ResourceWorkerProtocolError(
+            "Resource worker returned invalid JSON"
+        ) from exc
+    try:
+        return to_json_object(parsed)
+    except (TypeError, ValueError) as exc:
+        raise ResourceWorkerProtocolError(
+            "Resource worker response must be a JSON object"
+        ) from exc
+
+
+def _parse_worker_result(
+    value: JsonObject,
+    *,
+    output_path: Path,
+    asset_prefix: str,
+    settings: ResourceSettings,
+) -> _WorkerResult:
+    markdown_file = _required_string(value, "markdown_file")
+    _worker_path(output_path, markdown_file)
+    raw_assets = value.get("assets")
+    if not isinstance(raw_assets, list) or len(raw_assets) > settings.max_assets:
+        raise ResourceWorkerProtocolError("Worker asset manifest is invalid")
+    assets: list[_WorkerAsset] = []
+    for item in raw_assets:
+        if not isinstance(item, dict):
+            raise ResourceWorkerProtocolError("Worker asset entry is invalid")
+        typed = cast(dict[str, object], item)
+        file = _required_string(typed, "file")
+        ref = _required_string(typed, "ref")
+        size = typed.get("size")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ResourceWorkerProtocolError("Worker asset size is invalid")
+        _worker_path(output_path, file)
+        parsed_ref = WorkspaceRef.parse(ref)
+        if not str(parsed_ref).startswith(asset_prefix + "/"):
+            raise ResourceWorkerProtocolError("Worker asset ref escapes target prefix")
+        assets.append(_WorkerAsset(file=file, ref=ref, size=size))
+    try:
+        status = ResourceContentStatus(_required_string(value, "content_status"))
+    except ValueError as exc:
+        raise ResourceWorkerProtocolError("Worker content status is invalid") from exc
+    visual = _bounded_strings(
+        value.get("visual_refs"),
+        limit=_MAX_RESULT_REFS,
+        label="visual refs",
+    )
+    asset_refs = {asset.ref for asset in assets}
+    if any(ref not in asset_refs for ref in visual):
+        raise ResourceWorkerProtocolError("Worker visual ref is not a generated asset")
+    warnings = _bounded_strings(
+        value.get("warning_codes"),
+        limit=_MAX_WARNINGS,
+        label="warnings",
+    )
+    return _WorkerResult(
+        markdown_file=markdown_file,
+        assets=tuple(assets),
+        content_status=status,
+        visual_refs=visual,
+        warning_codes=warnings,
+    )
+
+
+def _worker_path(root: Path, relative: str) -> Path:
+    if Path(relative).is_absolute():
+        raise ResourceWorkerProtocolError("Worker output path must be relative")
+    try:
+        return resolve_under_root(root, relative)
+    except FilesystemBoundaryError as exc:
+        raise ResourceWorkerProtocolError(
+            "Worker output path escapes staging root"
+        ) from exc
+
+
+def _required_string(value: Mapping[str, object], name: str) -> str:
+    item = value.get(name)
+    if not isinstance(item, str) or not item:
+        raise ResourceWorkerProtocolError(f"Worker response field is invalid: {name}")
+    return item
+
+
+def _optional_string(value: JsonObject, name: str) -> str:
+    item = value.get(name, "")
+    return item if isinstance(item, str) else ""
+
+
+def _required_bool(value: JsonObject, name: str) -> bool:
+    item = value.get(name)
+    if not isinstance(item, bool):
+        raise ResourceWorkerProtocolError(
+            "Resource worker response is missing completion status"
+        )
+    return item
+
+
+def _bounded_strings(value: object, *, limit: int, label: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or len(value) > limit:
+        raise ResourceWorkerProtocolError(f"Worker {label} are invalid")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            raise ResourceWorkerProtocolError(f"Worker {label} are invalid")
+        if item not in result:
+            result.append(item)
+    return tuple(result)

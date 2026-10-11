@@ -1,0 +1,382 @@
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+from time import monotonic
+
+import pytest
+
+from tinysoul.infra.json import to_json_object
+from tinysoul.kernel.interaction import (
+    AnswerKind,
+    QuestionAnswer,
+    QuestionContent,
+    QuestionError,
+    QuestionOption,
+)
+from tinysoul.kernel.loop.interaction.events import TurnEventSubscription
+from tinysoul.kernel.loop.interaction.inbox import (
+    InboxCapacityError,
+    InboxClosedError,
+    InboxError,
+    InboxKind,
+    InboxLimits,
+    InboxRecord,
+    QuestionRequest,
+    TurnInbox,
+    WaitCondition,
+    WaitReason,
+    WakeReason,
+)
+from tinysoul.runtime.events import EnvironmentEvent, EventFilter, EventKind
+from tinysoul.runtime.sources import SourceState, SourceStatus
+
+
+async def test_choice_reply_preserves_option_content_and_pending_reads_do_not_consume() -> (
+    None
+):
+    inbox = TurnInbox()
+    question = QuestionRequest(
+        "q",
+        QuestionContent(
+            "Choose", (QuestionOption("a", "Run", "Use the checked plan"),), False
+        ),
+    )
+    await inbox.open_question(question)
+    with pytest.raises(InboxError):
+        await inbox.reply("q", QuestionAnswer(AnswerKind.TEXT, text="other"))
+    with pytest.raises(InboxError):
+        await inbox.reply("q", QuestionAnswer(AnswerKind.CHOICE, option_id="missing"))
+    answer = QuestionAnswer(AnswerKind.CHOICE, option_id="a", comment="Start now")
+    await inbox.reply("q", answer)
+    pending = inbox.pending_items()
+    assert len(pending) == 1 and pending[0].payload["answer"] == answer.to_json()
+    assert pending[0].payload["text"] == "Run (a)\nUse the checked plan\nStart now"
+    pending[0].payload["text"] = "not owner state"
+    batch = await inbox.capture()
+    assert batch.records[0][1].payload["text"] != "not owner state"
+
+
+def test_question_sources_preserve_complete_body_and_do_not_pollute_answers() -> None:
+    question = QuestionContent.from_json(
+        {
+            "details": "Keeping the source preserves the audit evidence.",
+            "question": "Which version should we keep?",
+            "options": [
+                {"id": "full", "label": "Full source", "description": "Retain examples"}
+            ],
+        }
+    )
+    assert question.text == question.details + "\n\n" + question.question
+    assert question.display()["text"] == question.text
+    assert "text" not in question.to_json()
+    assert QuestionContent.from_json(question.to_json()) == question
+    answer = QuestionAnswer(
+        AnswerKind.CHOICE, option_id="full", comment="Add citations"
+    )
+    assert question.text in question.reply_narrative(answer)
+    assert question.details not in question.answer_text(answer)
+    assert question.allow_other
+    assert (
+        question.answer_text(QuestionAnswer(AnswerKind.TEXT, text="Another approach"))
+        == "Another approach"
+    )
+    for value in (
+        {"text": "Legacy question"},
+        {"question": "Choose", "allow_other": False},
+    ):
+        with pytest.raises(QuestionError):
+            QuestionContent.from_json(to_json_object(value))
+
+
+async def test_state_notifications_preserve_capture_input_order_and_receipt_time() -> (
+    None
+):
+    inbox = TurnInbox(InboxLimits(capacity=1))
+    inbox.subscribe_events(
+        (
+            TurnEventSubscription(
+                EventFilter(topic="files.changed", source="files"),
+                lambda event, scope: (),
+                coalesce=True,
+                requires_decision=False,
+            ),
+        )
+    )
+    first = InboxRecord(InboxKind.INPUT, {"text": "first"}, received_at=123.5)
+    await inbox.accept(first)
+    for index in range(20):
+        await inbox.accept_event(
+            EnvironmentEvent(
+                EventKind.EVENT, {"value": index}, topic="files.changed", source="files"
+            )
+        )
+    batch = await inbox.capture()
+    assert len(batch.records) == 2
+    assert batch.records[0][1].received_at == 123.5
+    assert batch.records[1][1].payload == {"value": 19}
+    await inbox.accept_event(
+        EnvironmentEvent(
+            EventKind.EVENT, {"value": 20}, topic="files.changed", source="files"
+        )
+    )
+    assert await inbox.capture() is batch
+    await inbox.ack(batch)
+    latest = await inbox.capture()
+    assert [item.payload for _, item in latest.records] == [{"value": 20}]
+    # State refresh alone does not revoke a completed answer.
+    assert await inbox.close_if_empty()
+
+
+async def test_topic_source_wait_and_source_failure_still_require_budget() -> None:
+    inbox = TurnInbox()
+    statuses = [SourceStatus("files", SourceState.RUNNING, topics=("files.changed",))]
+    inbox.bind_source_status(lambda: tuple(statuses))
+    budget = await inbox.request_budget(2)
+    condition = WaitCondition(
+        WaitReason.EVENT,
+        0,
+        event_kind=InboxKind.EVENT,
+        topic="files.changed",
+        source="files",
+    )
+    waiter = asyncio.create_task(inbox.wait_for_cycle(condition, budget=budget))
+    await asyncio.sleep(0)
+    assert not inbox.accepts_event(
+        EnvironmentEvent(EventKind.EVENT, {}, topic="unrelated", source="files")
+    )
+    statuses[0] = SourceStatus(
+        "files", SourceState.FAILED, "OSError", ("files.changed",)
+    )
+    status = EnvironmentEvent(
+        EventKind.EVENT,
+        {"state": "failed"},
+        topic="runtime.source_status",
+        source="files",
+    )
+    assert inbox.accepts_event(status)
+    await inbox.accept_event(status)
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    await inbox.grant_cycles(budget.request_id, 2)
+    assert (await asyncio.wait_for(waiter, 1)).reason is WakeReason.SOURCE_UNAVAILABLE
+
+
+async def test_fixed_batch_retries_exclude_new_arrivals_and_ack_preserves_identity() -> (
+    None
+):
+    inbox = TurnInbox(InboxLimits(capacity=2))
+    first = InboxRecord(InboxKind.INPUT, {"text": "one"}, "one")
+    receipt = await inbox.accept(first)
+    batch = await inbox.capture()
+    await inbox.accept(InboxRecord(InboxKind.EVENT, {"value": 2}, "two"))
+    assert await inbox.capture() is batch
+    assert [item.record_id for _, item in batch.records] == ["one"]
+    with pytest.raises(InboxCapacityError):
+        await inbox.accept(InboxRecord(InboxKind.EVENT, {}, "three"))
+    await inbox.ack(batch)
+    duplicate = await inbox.accept(first)
+    assert duplicate.sequence == receipt.sequence and not duplicate.accepted
+    with pytest.raises(InboxError):
+        await inbox.accept(InboxRecord(InboxKind.INPUT, {"text": "different"}, "one"))
+    assert [item.record_id for _, item in (await inbox.capture()).records] == ["two"]
+
+
+async def test_wait_is_non_consuming_and_close_wakes_waiter() -> None:
+    inbox = TurnInbox()
+    wait = asyncio.create_task(
+        inbox.wait_for_cycle(
+            WaitCondition(WaitReason.EVENT, 0, event_kind=InboxKind.EVENT)
+        )
+    )
+    await asyncio.sleep(0)
+    await inbox.accept(InboxRecord(InboxKind.EVENT, {}, "e"))
+    assert await asyncio.wait_for(wait, 1)
+    batch = await inbox.capture()
+    assert batch.records
+    assert not await inbox.close_if_empty()
+    await inbox.ack(batch)
+    wait = asyncio.create_task(
+        inbox.wait_for_cycle(
+            WaitCondition(
+                WaitReason.EVENT, batch.next_sequence, event_kind=InboxKind.EVENT
+            )
+        )
+    )
+    await asyncio.sleep(0)
+    assert await inbox.close_if_empty()
+    with pytest.raises(InboxClosedError):
+        await asyncio.wait_for(wait, 1)
+    with pytest.raises(InboxClosedError):
+        await inbox.accept(InboxRecord(InboxKind.EVENT, {}, "late"))
+
+
+async def test_budget_decision_is_independent_of_full_progress_queue() -> None:
+    inbox = TurnInbox(InboxLimits(capacity=1))
+    await inbox.accept(InboxRecord(InboxKind.EVENT, {}, "e"))
+    request = await inbox.request_budget(3)
+    waiter = asyncio.create_task(inbox.wait_for_cycle(budget=request))
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    assert await inbox.grant_cycles(request.request_id, 2)
+    assert not await inbox.grant_cycles(request.request_id, 2)
+    with pytest.raises(InboxError):
+        await inbox.grant_cycles(request.request_id, 4)
+    assert (await waiter).granted_cycles == 2
+    assert (await inbox.capture()).records
+
+
+async def test_payload_snapshot_and_encoded_size_are_owned_by_inbox() -> None:
+    inbox = TurnInbox(InboxLimits(max_record_bytes=90))
+    record = InboxRecord(InboxKind.EVENT, {"text": "one"}, "e")
+    await inbox.accept(record)
+    record.payload["text"] = "changed"
+    assert (await inbox.capture()).records[0][1].payload["text"] == "one"
+    with pytest.raises(InboxCapacityError):
+        await inbox.accept(InboxRecord(InboxKind.EVENT, {"text": "汉" * 30}, "large"))
+
+
+async def test_reply_has_reserved_capacity_and_timeout_rejects_late_reply() -> None:
+    inbox = TurnInbox(InboxLimits(capacity=1))
+    await inbox.accept(InboxRecord(InboxKind.EVENT, {}, "event"))
+    question = QuestionRequest("q", QuestionContent("choose"))
+    await inbox.open_question(question)
+    await inbox.reply("q", QuestionAnswer(AnswerKind.TEXT, text="yes"))
+    assert (
+        await inbox.wait_for_cycle(
+            WaitCondition(WaitReason.INPUT, 0, question=question)
+        )
+    ).reason is WakeReason.REPLY
+    batch = await inbox.capture()
+    assert [record.kind for _, record in batch.records] == [
+        InboxKind.EVENT,
+        InboxKind.REPLY,
+    ]
+    await inbox.ack(batch)
+    timed = QuestionRequest("timed", QuestionContent("choose"), timeout_seconds=0.001)
+    await inbox.open_question(timed)
+    assert (
+        await inbox.wait_for_cycle(
+            WaitCondition(
+                WaitReason.INPUT,
+                batch.next_sequence,
+                deadline=asyncio.get_running_loop().time() + 0.001,
+                question=timed,
+            )
+        )
+    ).reason is WakeReason.TIMER
+    with pytest.raises(InboxClosedError):
+        await inbox.reply("timed", QuestionAnswer(AnswerKind.TEXT, text="late"))
+
+
+async def test_terminal_capacity_is_reserved_independently_from_progress() -> None:
+    inbox = TurnInbox(InboxLimits(capacity=1, terminal_capacity=1))
+    await inbox.accept(InboxRecord(InboxKind.EVENT, {}, "progress"))
+    await inbox.reserve_terminal("job")
+    with pytest.raises(InboxCapacityError):
+        await inbox.reserve_terminal("excess")
+    await inbox.close()
+    await inbox.deliver_terminal("job", {"state": "cancelled"})
+    batch = await inbox.capture()
+    assert [record.kind for _, record in batch.records] == [
+        InboxKind.EVENT,
+        InboxKind.JOB,
+    ]
+    await inbox.ack(batch)
+
+
+@pytest.mark.parametrize("grant_first", [False, True])
+async def test_event_readiness_and_budget_must_both_arrive_without_consuming(
+    grant_first: bool,
+) -> None:
+    inbox = TurnInbox()
+    budget = await inbox.request_budget(3)
+    condition = WaitCondition(
+        WaitReason.EVENT, 0, event_kind=InboxKind.EVENT, event_id="matching"
+    )
+    waiter = asyncio.create_task(inbox.wait_for_cycle(condition, budget=budget))
+    await inbox.accept(InboxRecord(InboxKind.EVENT, {}, "unrelated"))
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    if grant_first:
+        await inbox.grant_cycles(budget.request_id, 2)
+    else:
+        await inbox.accept(InboxRecord(InboxKind.EVENT, {}, "matching"))
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    if grant_first:
+        await inbox.accept(InboxRecord(InboxKind.EVENT, {}, "matching"))
+    else:
+        await inbox.grant_cycles(budget.request_id, 2)
+    readiness = await asyncio.wait_for(waiter, 1)
+    assert readiness.reason is WakeReason.EVENT and readiness.granted_cycles == 2
+    batch = await inbox.capture()
+    assert [record.record_id for _, record in batch.records] == [
+        "unrelated",
+        "matching",
+    ]
+    await inbox.ack(batch)
+    next_wait = asyncio.create_task(
+        inbox.wait_for_cycle(replace(condition, after_sequence=batch.next_sequence))
+    )
+    await asyncio.sleep(0)
+    assert not next_wait.done()
+    await inbox.close()
+    with pytest.raises(InboxClosedError):
+        await next_wait
+
+
+@pytest.mark.parametrize(
+    "reason", [WaitReason.INPUT, WaitReason.EVENT, WaitReason.TIMER]
+)
+async def test_append_interrupts_wait_but_does_not_grant_budget(
+    reason: WaitReason,
+) -> None:
+    inbox = TurnInbox()
+    question = (
+        QuestionRequest("q", QuestionContent("choose"))
+        if reason is WaitReason.INPUT
+        else None
+    )
+    if question is not None:
+        await inbox.open_question(question)
+    condition = WaitCondition(
+        reason,
+        0,
+        question=question,
+        deadline=monotonic() + 60 if reason is WaitReason.TIMER else None,
+        event_kind=InboxKind.EVENT if reason is WaitReason.EVENT else None,
+    )
+    budget = await inbox.request_budget(1)
+    waiter = asyncio.create_task(inbox.wait_for_cycle(condition, budget=budget))
+    await inbox.accept(
+        InboxRecord(InboxKind.INPUT, {"text": "new direction"}, "append")
+    )
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    if question is not None:
+        with pytest.raises(InboxClosedError):
+            await inbox.reply(
+                question.question_id, QuestionAnswer(AnswerKind.TEXT, text="late")
+            )
+    await inbox.grant_cycles(budget.request_id, 1)
+    assert (await asyncio.wait_for(waiter, 1)).reason is WakeReason.INPUT
+    assert all(
+        record.kind is not InboxKind.REPLY
+        for _, record in (await inbox.capture()).records
+    )
+
+
+async def test_elapsed_timer_keeps_deadline_while_waiting_for_budget() -> None:
+    inbox = TurnInbox()
+    budget = await inbox.request_budget(1)
+    waiter = asyncio.create_task(
+        inbox.wait_for_cycle(
+            WaitCondition(WaitReason.TIMER, 0, deadline=monotonic() - 1),
+            budget=budget,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    await inbox.grant_cycles(budget.request_id, 1)
+    assert (await asyncio.wait_for(waiter, 1)).reason is WakeReason.TIMER

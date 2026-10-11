@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=70.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinysoul"
+version = "0.1.0"
+description = "A local provider-neutral LLM agent runtime"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.13"
+dependencies = [
+    "watchfiles>=1.1,<2",
+    "fastapi>=0.116,<1",
+    "httpx>=0.27",
+    "lxml>=5.0",
+    "markdown-it-py>=3,<5",
+    "markitdown[pdf,docx]",
+    "openai>=1.0",
+    "Pillow",
+    "pypdf",
+    "pypdfium2",
+    "PyYAML>=6.0",
+    "regex>=2024.11.6",
+    "trafilatura>=2.0",
+    "uvicorn>=0.35,<1",
+    "websockets>=15,<16",
+]
+
+[project.scripts]
+tinysoul = "tinysoul.gateway.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "tinysoul[external-tools]",
+    "crawlee>=1.8,<2",
+    "pytest",
+    "pytest-asyncio>=1.0,<2",
+    "setuptools>=70.1",
+    "ty>=0.0.84",
+]
+web-crawl = [
+    "crawlee>=1.8,<2",
+]
+external-tools = [
+    "agent-client-protocol==0.12.1",
+    "mcp==2.2.0",
+    "jsonschema>=4.26,<5",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tinysoul*"]
+
+[tool.setuptools.package-data]
+"tinysoul.prompts" = ["README.md"]
+"tinysoul.infra.config" = [
+    "catalog/*.toml",
+]
+"tinysoul.assets" = [
+    "common/**/*",
+    "common/.gitignore",
+    "standard/**/*",
+    "standard/.env.example",
+    "development/**/*",
+    "development/.env.example",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --import-mode=importlib"
+anyio_mode = "auto"
+cache_dir = ".local-test/pytest-cache"
+markers = [
+    "external: requires a real provider or network service",
+    "generation: exercises package-owned project or resource generation",
+    "release: builds and validates an installable wheel",
+]
+
+[tool.ty.environment]
+# Keep machine-specific Python paths out of shared config.
+# Use scripts/typecheck.ps1 with TINYSOUL_PYTHON, or pass ty --python manually.
+root = ["."]

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "ref": {
+      "title": "Ref",
+      "type": "string"
+    },
+    "day": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Day"
+    },
+    "turn_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Turn Id"
+    },
+    "view": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "View"
+    }
+  },
+  "required": [
+    "ref"
+  ],
+  "title": "ResourceLocatorResponse",
+  "type": "object"
+}

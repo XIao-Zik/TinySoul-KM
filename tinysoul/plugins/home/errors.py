@@ -1,0 +1,44 @@
+"""Agent Home module errors."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from tinysoul.infra.json import JsonObject
+
+
+class AgentHomeError(Exception):
+    """Base class for Agent Home module errors."""
+
+
+class AgentHomeContractError(AgentHomeError):
+    """Raised when callers violate Agent Home contracts."""
+
+
+class AgentHomeInvariantError(AgentHomeError):
+    """Raised when Agent Home internal invariants are broken."""
+
+
+class AgentHomeNotFoundError(AgentHomeContractError):
+    """Requested Home content is absent from the selected owner view."""
+
+
+class AgentHomeIOError(AgentHomeError):
+    """Raised when Agent Home filesystem operations fail at the module boundary."""
+
+
+class AgentHomeRuntimeCopyRequired(AgentHomeError):
+    """Raised when a home ref must be copied into runtime home before reading."""
+
+    def __init__(self, ref: str, *, source_path: Path, runtime_path: Path) -> None:
+        super().__init__(f"Agent Home runtime copy is required: {ref}")
+        self.ref = ref
+        self.source_path = source_path
+        self.runtime_path = runtime_path
+
+    def to_payload(self) -> JsonObject:
+        """Project recovery identity; physical paths stay on the local exception."""
+        return {
+            "ref": self.ref,
+            "error_type": type(self).__name__,
+        }

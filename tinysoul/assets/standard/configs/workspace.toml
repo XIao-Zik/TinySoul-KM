@@ -1,0 +1,31 @@
+[workspace]
+root = "runtime/workspace"
+max_files = 100
+max_read_chars = 4000
+max_write_chars = 12000
+max_image_bytes = 5242880
+ignore_dirs = [
+  ".agents",
+  ".codex",
+  ".git",
+  ".pytest-local-tmp",
+  ".pytest_cache",
+  ".test-tmp",
+  ".tinysoul",
+  "__pycache__",
+]
+
+[workspace.watch]
+enabled = true
+debounce_ms = 200
+
+[workspace.search]
+max_query_chars = 256
+max_scan_chars = 1000000
+
+[workspace.analysis]
+max_intent_chars = 2000
+max_reference_refs = 8
+max_source_chars = 24000
+max_chars_per_reference = 12000
+max_answer_chars = 4000

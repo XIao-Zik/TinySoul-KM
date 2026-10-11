@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "JsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "type": "object"
+    },
+    "JsonScalar": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonScalar"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "properties": {
+    "ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ref"
+    },
+    "kind": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Kind"
+    },
+    "view": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "View"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "next_continuation": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Continuation"
+    },
+    "content_fragment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonObject"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "metadata": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonObject"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "truncated": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Truncated"
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Request Id"
+    },
+    "turn_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Turn Id"
+    },
+    "day": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Day"
+    },
+    "generation_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Generation Id"
+    },
+    "state": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "State"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Status"
+    },
+    "pending_items": {
+      "items": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "title": "Pending Items",
+      "type": "array"
+    },
+    "queued_request": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonObject"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonObject"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "history_unavailable": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "History Unavailable"
+    }
+  },
+  "required": [
+    "items",
+    "turn_id",
+    "day"
+  ],
+  "title": "InteractionPageResponse",
+  "type": "object"
+}

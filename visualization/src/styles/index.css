@@ -1,0 +1,1510 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+@import "katex/dist/katex.min.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * TinySoul design tokens — the "Luminous" system: three-tier neutral
+ * surfaces with a glossy elevation language, an aurora accent gradient, and
+ * per-domain hues. Light theme on :root, dark theme on .dark; components
+ * consume variables via the @theme mappings below (bg-bg, text-fg,
+ * border-line, bg-accent, text-domain-web, ...).
+ */
+:root {
+  --bg: #f6f7f9;
+  --bg-rgb: 246, 247, 249;
+  --bg-elev: #ffffff;
+  --bg-sunken: #eef0f3;
+  --hover: rgba(15, 23, 42, 0.05);
+  --active: rgba(99, 102, 241, 0.1);
+  --fg: #1c2333;
+  --fg-muted: #5b6577;
+  --fg-faint: #98a2b3;
+  --line: #e3e6eb;
+  --line-strong: #cfd4dc;
+  --accent: #6366f1;
+  --accent-rgb: 99, 102, 241;
+  --accent-strong: #4f46e5;
+  --accent-soft: rgba(99, 102, 241, 0.12);
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.1);
+  --success: #16a34a;
+  --success-soft: rgba(22, 163, 74, 0.1);
+  --warning: #d97706;
+  --warning-soft: rgba(217, 119, 6, 0.12);
+  --info: #0284c7;
+  --info-soft: rgba(2, 132, 199, 0.1);
+  --code-bg: #f0f2f5;
+  /* aurora accent: calm deep indigo→blue gradient (no violet), white-text
+     safe; shared by bubbles, logo, primary actions */
+  --accent-grad: linear-gradient(135deg, #4f46e5, #2563eb);
+  /* spectral hue used inside motion gradients (shine text, live border) */
+  --hue-violet: #8b5cf6;
+  /* terminal stream palette: the dark "machine window" the answer types
+     into before it settles as a document — deliberately identical in both
+     page themes (it is a screen, not a surface). The ground is neutral
+     graphite; the phosphor green lives only in the decorations */
+  --term-bg: #0d1217;
+  --term-bg-2: #111820;
+  --term-fg: #d0d8d4;
+  --term-green: #34d399;
+  --term-cyan: #22d3ee;
+  /* action-domain hues: one consistent color per backend action domain */
+  --domain-core: var(--accent);
+  --domain-core-soft: var(--accent-soft);
+  --domain-workspace: #2563eb;
+  --domain-workspace-soft: rgba(37, 99, 235, 0.1);
+  --domain-execution: #ea580c;
+  --domain-execution-soft: rgba(234, 88, 12, 0.11);
+  --domain-web: #0d9488;
+  --domain-web-soft: rgba(13, 148, 136, 0.11);
+  --domain-home: #9333ea;
+  --domain-home-soft: rgba(147, 51, 234, 0.1);
+  --domain-memory: #db2777;
+  --domain-memory-soft: rgba(219, 39, 119, 0.1);
+  --domain-maintenance: #64748b;
+  --domain-maintenance-soft: rgba(100, 116, 139, 0.12);
+  /* elevation: contact shadow + ambient shadow + top gloss highlight */
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.65),
+    0 1px 2px rgba(15, 23, 42, 0.05), 0 6px 16px rgba(15, 23, 42, 0.05);
+  --shadow-pop: inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 12px 40px rgba(15, 23, 42, 0.16);
+  --shadow-brand: inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 2px 10px rgba(79, 70, 229, 0.32);
+  --focus-ring: 0 0 0 3px var(--accent-soft);
+  --focus-glow: 0 0 0 3px var(--accent-soft), 0 0 22px color-mix(in srgb, var(--accent) 18%, transparent);
+  --selection-glow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent), 0 0 16px color-mix(in srgb, var(--accent) 16%, transparent);
+  /* z-index scale: overlay < drawer < toast < sub-drawer */
+  --z-overlay: 40;
+  --z-drawer: 50;
+  --z-toast: 60;
+  --z-subdrawer-overlay: 65;
+  --z-subdrawer: 70;
+  color-scheme: light;
+}
+
+.dark {
+  --bg: #0d1017;
+  --bg-rgb: 13, 16, 23;
+  --bg-elev: #151a23;
+  --bg-sunken: #090c12;
+  --hover: rgba(230, 233, 239, 0.06);
+  --active: rgba(129, 140, 248, 0.14);
+  --fg: #e6e9ef;
+  --fg-muted: #9aa4b2;
+  --fg-faint: #646e7d;
+  --line: #262b34;
+  --line-strong: #363d49;
+  --accent: #818cf8;
+  --accent-rgb: 129, 140, 248;
+  --accent-strong: #6366f1;
+  --accent-soft: rgba(129, 140, 248, 0.14);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.12);
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, 0.12);
+  --warning: #fbbf24;
+  --warning-soft: rgba(251, 191, 36, 0.12);
+  --info: #38bdf8;
+  --info-soft: rgba(56, 189, 248, 0.12);
+  --code-bg: #1d2129;
+  --accent-grad: linear-gradient(135deg, #4f46e5, #2563eb);
+  --hue-violet: #a78bfa;
+  --domain-core: var(--accent);
+  --domain-core-soft: var(--accent-soft);
+  --domain-workspace: #60a5fa;
+  --domain-workspace-soft: rgba(96, 165, 250, 0.12);
+  --domain-execution: #fb923c;
+  --domain-execution-soft: rgba(251, 146, 60, 0.13);
+  --domain-web: #2dd4bf;
+  --domain-web-soft: rgba(45, 212, 191, 0.12);
+  --domain-home: #c084fc;
+  --domain-home-soft: rgba(192, 132, 252, 0.13);
+  --domain-memory: #f472b6;
+  --domain-memory-soft: rgba(244, 114, 182, 0.13);
+  --domain-maintenance: #94a3b8;
+  --domain-maintenance-soft: rgba(148, 163, 184, 0.14);
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 1px 2px rgba(0, 0, 0, 0.4),
+    0 6px 16px rgba(0, 0, 0, 0.32);
+  --shadow-pop: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 12px 40px rgba(0, 0, 0, 0.55);
+  --shadow-brand: inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 2px 12px rgba(109, 40, 217, 0.45);
+  --focus-ring: 0 0 0 3px var(--accent-soft);
+  --focus-glow: 0 0 0 3px var(--accent-soft), 0 0 22px color-mix(in srgb, var(--accent) 24%, transparent);
+  --selection-glow: 0 0 0 1px color-mix(in srgb, var(--accent) 42%, transparent), 0 0 16px color-mix(in srgb, var(--accent) 22%, transparent);
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-elev: var(--bg-elev);
+  --color-bg-sunken: var(--bg-sunken);
+  --color-hover: var(--hover);
+  --color-active: var(--active);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-faint: var(--fg-faint);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-code-bg: var(--code-bg);
+  --color-hue-violet: var(--hue-violet);
+  --color-domain-core: var(--domain-core);
+  --color-domain-core-soft: var(--domain-core-soft);
+  --color-domain-workspace: var(--domain-workspace);
+  --color-domain-workspace-soft: var(--domain-workspace-soft);
+  --color-domain-execution: var(--domain-execution);
+  --color-domain-execution-soft: var(--domain-execution-soft);
+  --color-domain-web: var(--domain-web);
+  --color-domain-web-soft: var(--domain-web-soft);
+  --color-domain-home: var(--domain-home);
+  --color-domain-home-soft: var(--domain-home-soft);
+  --color-domain-memory: var(--domain-memory);
+  --color-domain-memory-soft: var(--domain-memory-soft);
+  --color-domain-maintenance: var(--domain-maintenance);
+  --color-domain-maintenance-soft: var(--domain-maintenance-soft);
+  --shadow-card: var(--shadow-card);
+  --shadow-pop: var(--shadow-pop);
+  --shadow-brand: var(--shadow-brand);
+  --shadow-focus-glow: var(--focus-glow);
+  --shadow-selection-glow: var(--selection-glow);
+  --font-sans: "Inter Variable", "Inter", "PingFang SC", "Microsoft YaHei", system-ui,
+    -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", "Cascadia Code", Consolas,
+    monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* ---- scrollbars ---- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---- animations ---- */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slide-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-slide-up { animation: slide-up 0.24s ease-out; }
+
+/* Waiting Dock Enhanced Styles */
+.waiting-dock-scrim {
+  background: linear-gradient(
+    to top,
+    rgba(var(--bg-rgb), 0.6) 0%,
+    rgba(var(--bg-rgb), 0.3) 50%,
+    transparent 100%
+  );
+  backdrop-filter: blur(16px) saturate(0.8);
+  -webkit-backdrop-filter: blur(16px) saturate(0.8);
+}
+
+.waiting-response-dock {
+  backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 12px 48px rgba(0, 0, 0, 0.3),
+    0 0 0 1px rgba(var(--accent-rgb), 0.25),
+    0 0 32px rgba(var(--accent-rgb), 0.12);
+}
+
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin-slow {
+  animation: spin-slow 2s linear infinite;
+}
+.animate-fade-in {
+  animation: fade-in 0.18s ease-out;
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(32px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+.animate-slide-in-right {
+  animation: slide-in-right 0.22s ease-out;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+
+@keyframes caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+/* terminal stream caret: an inline phosphor block riding the end of the
+   last line (like a real terminal cursor) — it takes no line of its own,
+   so the typing card and the settled card share the same bottom spacing;
+   during the settle beat it dims out where the text ended */
+.answer-streaming .md-body > :last-child::after,
+.answer-settling .md-body > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 0.95em;
+  margin-left: 5px;
+  border-radius: 1px;
+  vertical-align: -0.12em;
+  background: var(--term-green);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.55);
+}
+.answer-streaming .md-body > :last-child::after {
+  animation:
+    caret-blink 1.06s step-end infinite,
+    caret-flicker 3.7s linear infinite;
+}
+.answer-settling .md-body > :last-child::after {
+  animation: caret-out 0.32s ease forwards;
+}
+@keyframes caret-flicker {
+  0%,
+  92%,
+  96%,
+  100% {
+    filter: brightness(1);
+  }
+  93%,
+  95% {
+    filter: brightness(1.7) saturate(1.4);
+  }
+}
+@keyframes caret-out {
+  to {
+    opacity: 0;
+    transform: scaleY(0.5);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+.animate-shimmer {
+  background: linear-gradient(
+    100deg,
+    var(--bg-sunken) 40%,
+    var(--bg-elev) 50%,
+    var(--bg-sunken) 60%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.animate-spin-slow {
+  animation: spin-slow 0.9s linear infinite;
+}
+
+/* ---- brand aurora gradient (user bubble, primary actions, logo) ---- */
+.bg-accent-grad {
+  background-image: var(--accent-grad);
+}
+
+/* ---- user bubble: tinted glass (accent wash, hairline, gloss, blur) ---- */
+.bubble-user {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-elev));
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  color: #1e1b4b;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    0 1px 3px rgba(79, 70, 229, 0.08);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.dark .bubble-user {
+  background: rgba(129, 140, 248, 0.16);
+  border-color: rgba(129, 140, 248, 0.3);
+  color: #e0e4ff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 2px 10px rgba(0, 0, 0, 0.35),
+    0 0 14px rgba(129, 140, 248, 0.1);
+}
+
+/* ---- agent answer card: two states of matter ----
+   Settled: a square document plate recessed into the page — sunken ground,
+   shaded top lip, lit bottom edge, an etched inner frame with L corner
+   marks and a faint scanline residue, like the terminal burned into paper.
+   Streaming: a dark terminal "machine window" — a neutral graphite layer
+   (::after) covers the recess, with the phosphor green living only in the
+   decorations: pixel grid, corner brackets, caret, refresh band. When the
+   stream ends (.answer-settling), the scanline holds a beat at the top,
+   then an etch head sweeps down: the terminal layer wipes away and the
+   phosphor text cools into ink on the revealed document. */
+.answer-card {
+  position: relative;
+  overflow: hidden;
+  --etch: color-mix(in srgb, var(--term-green) 22%, var(--line-strong));
+  --frame: color-mix(in srgb, var(--line-strong) 42%, transparent);
+  background:
+    /* L corner marks */
+    linear-gradient(var(--etch), var(--etch)) left 7px top 7px / 12px 1px,
+    linear-gradient(var(--etch), var(--etch)) left 7px top 7px / 1px 12px,
+    linear-gradient(var(--etch), var(--etch)) right 7px top 7px / 12px 1px,
+    linear-gradient(var(--etch), var(--etch)) right 7px top 7px / 1px 12px,
+    linear-gradient(var(--etch), var(--etch)) left 7px bottom 7px / 12px 1px,
+    linear-gradient(var(--etch), var(--etch)) left 7px bottom 7px / 1px 12px,
+    linear-gradient(var(--etch), var(--etch)) right 7px bottom 7px / 12px 1px,
+    linear-gradient(var(--etch), var(--etch)) right 7px bottom 7px / 1px 12px,
+    /* inner frame hairlines, broken before the corners */
+    linear-gradient(var(--frame), var(--frame)) left 24px top 4px / calc(100% - 48px) 1px,
+    linear-gradient(var(--frame), var(--frame)) left 24px bottom 4px / calc(100% - 48px) 1px,
+    linear-gradient(var(--frame), var(--frame)) left 4px top 24px / 1px calc(100% - 48px),
+    linear-gradient(var(--frame), var(--frame)) right 4px top 24px / 1px calc(100% - 48px),
+    /* scanline residue */
+    repeating-linear-gradient(180deg, rgba(15, 23, 42, 0.014) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, #e8ebf0 0%, #eef0f3 22%);
+  background-repeat: no-repeat;
+  border-color: color-mix(in srgb, var(--line-strong) 55%, transparent);
+  box-shadow:
+    inset 0 1px 2px rgba(15, 23, 42, 0.07),
+    inset 0 3px 8px rgba(15, 23, 42, 0.045),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.65);
+  transition:
+    box-shadow 0.9s ease,
+    border-color 0.9s ease;
+}
+/* terminal overlay: graphite ground + scanlines + green pixel grid + a
+   refresh band; at rest it is fully wiped (clipped from the top) and
+   invisible */
+.answer-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    /* corner brackets live on the terminal layer and are etched away
+       with it — no swap at the settle moment */
+    linear-gradient(var(--term-cyan), var(--term-cyan)) left 8px top 8px / 12px 1px,
+    linear-gradient(var(--term-cyan), var(--term-cyan)) left 8px top 8px / 1px 12px,
+    linear-gradient(var(--term-cyan), var(--term-cyan)) right 8px top 8px / 12px 1px,
+    linear-gradient(var(--term-cyan), var(--term-cyan)) right 8px top 8px / 1px 12px,
+    linear-gradient(var(--term-cyan), var(--term-cyan)) left 8px bottom 8px / 12px 1px,
+    linear-gradient(var(--term-cyan), var(--term-cyan)) left 8px bottom 8px / 1px 12px,
+    linear-gradient(var(--term-cyan), var(--term-cyan)) right 8px bottom 8px / 12px 1px,
+    linear-gradient(var(--term-cyan), var(--term-cyan)) right 8px bottom 8px / 1px 12px,
+    /* soft screen glow falling from the top */
+    radial-gradient(120% 90% at 50% 0%, rgba(52, 211, 153, 0.032), transparent 62%),
+    linear-gradient(180deg, transparent 0%, rgba(52, 211, 153, 0.035) 42%,
+      rgba(34, 211, 238, 0.07) 50%, rgba(52, 211, 153, 0.035) 58%, transparent 100%)
+      0 -180px / 100% 180px,
+    repeating-linear-gradient(180deg, rgba(214, 224, 219, 0.026) 0 1px, transparent 1px 3px),
+    linear-gradient(rgba(52, 211, 153, 0.042) 1px, transparent 1px) 0 0 / 6px 6px,
+    linear-gradient(90deg, rgba(52, 211, 153, 0.042) 1px, transparent 1px) 0 0 / 6px 6px,
+    linear-gradient(180deg, var(--term-bg), var(--term-bg-2));
+  background-repeat:
+    no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat, no-repeat,
+    no-repeat, no-repeat, no-repeat, repeat, repeat, repeat, no-repeat;
+  opacity: 0;
+  clip-path: inset(100% 0 0 0);
+  transition:
+    opacity 0.35s ease,
+    clip-path 0.45s cubic-bezier(0.22, 0.9, 0.3, 1);
+  pointer-events: none;
+}
+.answer-card > .md-body {
+  position: relative;
+  z-index: 1;
+}
+/* ::before is only the etch head: it fades in as a band at the top, rides
+   the wipe boundary down, and fades out past the bottom edge */
+.answer-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition:
+    opacity 0.4s ease,
+    transform 1.2s cubic-bezier(0.45, 0, 0.25, 1);
+  pointer-events: none;
+  z-index: 2;
+}
+.answer-card.answer-streaming {
+  border-color: color-mix(in srgb, var(--term-green) 38%, transparent);
+  box-shadow:
+    inset 0 0 0 1px rgba(52, 211, 153, 0.08),
+    0 0 24px rgba(52, 211, 153, 0.12),
+    0 0 8px rgba(34, 211, 238, 0.1);
+}
+.answer-card.answer-streaming::after {
+  opacity: 1;
+  clip-path: inset(0 0 0 0);
+  animation: term-refresh 3.2s linear infinite;
+}
+@keyframes term-refresh {
+  from {
+    background-position: left 8px top 8px, left 8px top 8px, right 8px top 8px,
+      right 8px top 8px, left 8px bottom 8px, left 8px bottom 8px, right 8px bottom 8px,
+      right 8px bottom 8px, 0 0, 0 -180px, 0 0, 0 0, 0 0, 0 0;
+  }
+  to {
+    background-position: left 8px top 8px, left 8px top 8px, right 8px top 8px,
+      right 8px top 8px, left 8px bottom 8px, left 8px bottom 8px, right 8px bottom 8px,
+      right 8px bottom 8px, 0 0, 0 calc(100% + 180px), 0 0, 0 0, 0 0, 0 0;
+  }
+}
+/* the settle wipe: after a 150ms beat with the etch head held at the top,
+   it sweeps down over 1.2s — a soft glowing band straddling the wipe
+   boundary; revealed document above, dark terminal below. The refresh band
+   keeps sweeping the still-covered region (no animation snap at the swap),
+   and the tail fades once the sweep exits */
+.answer-card.answer-settling::after {
+  opacity: 1;
+  clip-path: inset(100% 0 0 0);
+  animation: term-refresh 3.2s linear infinite;
+  transition:
+    clip-path 1.2s cubic-bezier(0.45, 0, 0.25, 1) 0.15s,
+    opacity 0.25s ease 1.3s;
+}
+/* the etch head fades in as a pure band (no background swap: the brackets
+   live on the terminal layer and are etched away with it); opacity rides a
+   1.6s in-hold-out curve matching the beat + sweep + exit */
+.answer-card.answer-settling::before {
+  background: linear-gradient(180deg, transparent 0%, rgba(52, 211, 153, 0.09) 62%,
+    rgba(34, 211, 238, 0.3) 90%, rgba(190, 255, 226, 0.75) 100%) 0 0 / 100% 36px no-repeat;
+  filter: drop-shadow(0 0 6px rgba(52, 211, 153, 0.45));
+  transform: translateY(calc(100% + 4px));
+  animation: etch-head 1.6s ease forwards;
+  transition: transform 1.2s cubic-bezier(0.45, 0, 0.25, 1) 0.15s;
+}
+@keyframes etch-head {
+  0% {
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  84% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* dark theme: the settled answer sinks into a dark well (sunken ground,
+   strong top-lip shade, faint bottom edge light); the terminal overlay is
+   identical in both themes — it is a screen, not a surface */
+.dark .answer-card {
+  --etch: color-mix(in srgb, var(--term-green) 18%, var(--line-strong));
+  --frame: color-mix(in srgb, var(--line-strong) 36%, transparent);
+  background:
+    linear-gradient(var(--etch), var(--etch)) left 7px top 7px / 12px 1px,
+    linear-gradient(var(--etch), var(--etch)) left 7px top 7px / 1px 12px,
+    linear-gradient(var(--etch), var(--etch)) right 7px top 7px / 12px 1px,
+    linear-gradient(var(--etch), var(--etch)) right 7px top 7px / 1px 12px,
+    linear-gradient(var(--etch), var(--etch)) left 7px bottom 7px / 12px 1px,
+    linear-gradient(var(--etch), var(--etch)) left 7px bottom 7px / 1px 12px,
+    linear-gradient(var(--etch), var(--etch)) right 7px bottom 7px / 12px 1px,
+    linear-gradient(var(--etch), var(--etch)) right 7px bottom 7px / 1px 12px,
+    linear-gradient(var(--frame), var(--frame)) left 24px top 4px / calc(100% - 48px) 1px,
+    linear-gradient(var(--frame), var(--frame)) left 24px bottom 4px / calc(100% - 48px) 1px,
+    linear-gradient(var(--frame), var(--frame)) left 4px top 24px / 1px calc(100% - 48px),
+    linear-gradient(var(--frame), var(--frame)) right 4px top 24px / 1px calc(100% - 48px),
+    repeating-linear-gradient(180deg, rgba(230, 237, 234, 0.013) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, #070a0f 0%, #090c12 24%);
+  background-repeat: no-repeat;
+  border-color: color-mix(in srgb, var(--line) 80%, transparent);
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.5),
+    inset 0 3px 10px rgba(0, 0, 0, 0.28),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.035);
+}
+
+/* inside the recessed answer card, code chips and table headers sit on the
+   elevated surface so they stay readable against the sunken ground */
+.answer-card .md-body pre,
+.answer-card .md-body th {
+  background: var(--bg-elev);
+}
+.answer-card .md-body :not(pre) > code {
+  background: var(--bg-elev);
+}
+
+/* phosphor-to-ink: the answer keeps the document's prose typography while
+   streaming — only the colors wear terminal phosphor. Every tinted element
+   cools back in step with the etch head (150ms beat, then the sweep), so
+   the scanline reads as setting the text into ink */
+.answer-card .md-body,
+.answer-card .md-body strong,
+.answer-card .md-body a,
+.answer-card .md-body blockquote,
+.answer-card .md-body pre,
+.answer-card .md-body pre code,
+.answer-card .md-body :not(pre) > code {
+  transition:
+    color 0.8s ease 0.15s,
+    background-color 0.8s ease 0.15s,
+    border-color 0.8s ease 0.15s;
+}
+.answer-streaming .md-body {
+  color: var(--term-fg);
+}
+.answer-streaming .md-body strong {
+  color: #eaf6ef;
+}
+.answer-streaming .md-body a {
+  color: var(--term-cyan);
+}
+.answer-streaming .md-body blockquote {
+  border-left-color: rgba(52, 211, 153, 0.35);
+  color: rgba(204, 217, 209, 0.72);
+}
+.answer-streaming .md-body pre {
+  background: rgba(0, 0, 0, 0.35);
+  border-color: rgba(52, 211, 153, 0.18);
+}
+.answer-streaming .md-body pre code {
+  color: var(--term-fg);
+}
+.answer-streaming .md-body :not(pre) > code {
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--term-green);
+}
+
+/* ---- chat page background: blueprint graph paper, 24px minor / 120px major ---- */
+.chat-grid {
+  background-image:
+    linear-gradient(rgba(13, 148, 136, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(13, 148, 136, 0.03) 1px, transparent 1px),
+    linear-gradient(rgba(13, 148, 136, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(13, 148, 136, 0.05) 1px, transparent 1px);
+  background-size:
+    24px 24px,
+    24px 24px,
+    120px 120px,
+    120px 120px;
+}
+.dark .chat-grid {
+  background-image:
+    linear-gradient(rgba(45, 212, 191, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45, 212, 191, 0.025) 1px, transparent 1px),
+    linear-gradient(rgba(45, 212, 191, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45, 212, 191, 0.045) 1px, transparent 1px);
+}
+
+/* ---- composer terminal hint: prompt glyph + mono placeholder ---- */
+.composer-prompt {
+  font-family: var(--font-mono);
+  color: var(--fg-faint);
+  transition:
+    color 0.25s ease,
+    text-shadow 0.25s ease;
+}
+.composer-box:focus-within .composer-prompt {
+  color: var(--term-green);
+  text-shadow: 0 0 8px rgba(52, 211, 153, 0.5);
+}
+.composer-input::placeholder {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+/* ---- final answer materializing: rise + de-blur, no hard cut ---- */
+@keyframes answer-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+.animate-answer-in {
+  animation: answer-in 0.5s ease-out both;
+}
+
+/* ---- glass surfaces (e2 overlays: drawers, floating panels) ---- */
+.glass-panel {
+  background: color-mix(in srgb, var(--bg) 80%, transparent);
+  backdrop-filter: blur(14px) saturate(1.35);
+  -webkit-backdrop-filter: blur(14px) saturate(1.35);
+}
+.glass-elev {
+  background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
+  backdrop-filter: blur(14px) saturate(1.35);
+  -webkit-backdrop-filter: blur(14px) saturate(1.35);
+}
+
+/* ---- unified focus ring ---- */
+.focus-ring:focus-visible,
+.focus-ring:focus {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ---- markdown body ---- */
+.md-body {
+  font-size: 14px;
+  line-height: 1.65;
+  word-break: break-word;
+  color: var(--fg);
+}
+.reading-column {
+  min-width: 0;
+}
+.reading-column .md-body pre,
+.reading-column .md-body table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+.md-body p {
+  margin: 0.5em 0;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  font-weight: 600;
+  margin: 1em 0 0.5em;
+  line-height: 1.35;
+}
+.md-body h1 {
+  font-size: 1.25em;
+}
+.md-body h2 {
+  font-size: 1.15em;
+}
+.md-body h3 {
+  font-size: 1.05em;
+}
+.md-body h4 {
+  font-size: 1em;
+}
+.md-body ul,
+.md-body ol {
+  padding-left: 1.5em;
+  margin: 0.5em 0;
+}
+.md-body li {
+  margin: 0.25em 0;
+}
+.md-body li > ul,
+.md-body li > ol {
+  margin: 0.15em 0;
+}
+.md-body code {
+  border-radius: 4px;
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  font-size: 13px;
+  font-family: var(--font-mono);
+  color: var(--accent-strong);
+}
+.dark .md-body code {
+  color: var(--accent);
+}
+.md-body pre {
+  margin: 0.6em 0;
+  overflow-x: auto;
+  border-radius: 8px;
+  background: var(--code-bg);
+  padding: 12px;
+  border: 1px solid var(--line);
+}
+.md-body pre code {
+  background: transparent;
+  padding: 0;
+  color: var(--fg);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.md-body blockquote {
+  border-left: 2px solid var(--line-strong);
+  padding-left: 12px;
+  margin: 0.6em 0;
+  color: var(--fg-muted);
+}
+.md-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 0.6em 0;
+}
+.md-body th,
+.md-body td {
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  text-align: left;
+}
+.md-body th {
+  background: var(--bg-sunken);
+  font-weight: 500;
+}
+.md-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md-body hr {
+  margin: 0.8em 0;
+  border: none;
+  border-top: 1px solid var(--line);
+}
+.md-body img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+.md-body input[type="checkbox"] {
+  margin-right: 6px;
+  accent-color: var(--accent);
+}
+
+/* calm variant for reasoning/thinking: bold runs stay readable, not shouty */
+.md-calm .md-body strong,
+.md-body.md-calm strong {
+  font-weight: 500;
+}
+
+/* ---- inline single-line markdown (the thinking slate preview): top-level
+   blocks collapse into one line; emphasis is flattened (weights and
+   italics inherit the slate's fine slanted style), links are inert,
+   display math degrades to inline size ---- */
+.md-inline .md-body {
+  /* bridge the wrapper's text styling past the .md-body root rule
+     (font-size/line-height/color are set on the root, so they would
+     otherwise win over inheritance) */
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+}
+.md-inline .md-body p,
+.md-inline .md-body h1,
+.md-inline .md-body h2,
+.md-inline .md-body h3,
+.md-inline .md-body h4,
+.md-inline .md-body h5,
+.md-inline .md-body h6,
+.md-inline .md-body blockquote,
+.md-inline .md-body ul,
+.md-inline .md-body ol,
+.md-inline .md-body li,
+.md-inline .md-body pre {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: inherit;
+}
+.md-inline .md-body h1,
+.md-inline .md-body h2,
+.md-inline .md-body h3,
+.md-inline .md-body h4,
+.md-inline .md-body h5,
+.md-inline .md-body h6,
+.md-inline .md-body strong {
+  font-weight: inherit;
+}
+.md-inline .md-body em {
+  font-style: inherit;
+}
+.md-inline .md-body a {
+  color: inherit;
+  text-decoration: none;
+  pointer-events: none;
+}
+.md-inline .md-body .katex-display {
+  display: inline;
+  margin: 0;
+}
+.md-inline .md-body .katex {
+  font-size: 1em;
+  font-style: normal;
+}
+
+/* ---- expanded thinking markdown: the same voice as the one-line preview
+   (fine, bright, gently slanted); bold stays a restrained 500, *em* turns
+   upright for contrast inside the slanted text, math stays upright ---- */
+.thinking-md {
+  font-size: 11.5px;
+  line-height: 20px;
+  font-weight: 380;
+  color: var(--fg-muted);
+  font-style: oblique 8deg;
+}
+.thinking-md strong {
+  font-weight: 500;
+}
+.thinking-md em {
+  font-style: normal;
+}
+.thinking-md .katex {
+  font-style: normal;
+}
+
+/* ---- JSON tree ---- */
+.json-tree {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.json-tree .jt-key {
+  color: var(--info);
+}
+.json-tree .jt-string {
+  color: var(--success);
+}
+.json-tree .jt-number {
+  color: var(--accent);
+}
+.json-tree .jt-boolean {
+  color: var(--warning);
+}
+.json-tree .jt-null {
+  color: var(--fg-faint);
+}
+.json-tree .jt-punct {
+  color: var(--fg-faint);
+}
+.json-tree .jt-toggle {
+  cursor: pointer;
+  user-select: none;
+  color: var(--fg-faint);
+  display: inline-block;
+  width: 14px;
+  transition: transform 0.12s;
+}
+.json-tree .jt-toggle.open {
+  transform: rotate(90deg);
+}
+/* nested levels: a hairline guide rail instead of bare padding */
+.json-tree .jt-children {
+  margin-left: 5px;
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+}
+/* row hover for easier scanning */
+.json-tree .jt-row {
+  border-radius: 4px;
+}
+.json-tree .jt-row:hover {
+  background: var(--hover);
+}
+
+/* ---- terminal block (stdout/stderr) ---- */
+.term-block {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: #0d1117;
+  color: #c9d1d9;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.term-block .term-stderr {
+  color: #ff7b72;
+}
+.term-block .term-cmd {
+  color: #79c0ff;
+}
+
+/* drawer transition helper */
+.drawer-panel {
+  transition: transform 0.24s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ---- flowing shine text (active thinking/executing headline) ---- */
+@keyframes shine-sweep {
+  from {
+    background-position: 130% 0;
+  }
+  to {
+    background-position: -130% 0;
+  }
+}
+.text-shine {
+  background: linear-gradient(
+    110deg,
+    var(--fg) 36%,
+    var(--accent) 46%,
+    var(--hue-violet) 50%,
+    var(--info) 54%,
+    var(--fg) 64%
+  );
+  background-size: 240% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shine-sweep 2.6s linear infinite;
+}
+
+/* ---- LLM-task sub-drawer: gentle slide + settle from the main drawer ---- */
+@keyframes sub-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(20px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-sub-drawer-in {
+  animation: sub-drawer-in 0.22s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* ---- grow-in: reserve-then-expand insertion (grid 0fr→1fr, no fixed
+   height) — old content is pushed down smoothly while the new block fades
+   in; the settled layout is identical to a plain insert. Deliberately
+   slower than a pop: the row opens room first, the content fades in
+   behind the phase delay on `.animate-step-in` ---- */
+.grow-in {
+  display: grid;
+  grid-template-rows: 0fr;
+  animation: grow-in 0.45s cubic-bezier(0.22, 0.9, 0.3, 1) forwards;
+}
+.grow-in > * {
+  overflow: hidden;
+  min-height: 0;
+}
+@keyframes grow-in {
+  to {
+    grid-template-rows: 1fr;
+  }
+}
+
+/* ---- materializing reveal for fresh reasoning content ---- */
+@keyframes reveal {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+.animate-reveal {
+  animation: reveal 0.45s ease-out both;
+}
+
+/* ---- crossfade swap (headline, thinking stream, glimpse): the outgoing
+   render fades on an absolute layer while the incoming one fades in; the
+   wrapper glides between the two content heights (see Crossfade.tsx) ---- */
+.xfade {
+  position: relative;
+  overflow: hidden;
+  transition: height 0.36s cubic-bezier(0.22, 0.9, 0.3, 1);
+}
+.xfade-exit {
+  position: absolute;
+  inset: 0;
+  padding: inherit;
+  pointer-events: none;
+}
+@keyframes xfade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes xfade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.animate-xfade-in {
+  animation: xfade-in 0.36s ease-out both;
+}
+.animate-xfade-out {
+  animation: xfade-out 0.28s ease-in both;
+}
+
+/* ---- rolling steps viewport: fixed max height once filled; older rows
+   scroll down with the flow and dissolve at the bottom edge instead of
+   popping out, so the card stops changing height at the page bottom ---- */
+.steps-viewport {
+  /* roomy enough to keep an expanded plan/result pair in view, bounded so
+     the card's frame freezes once the viewport is full */
+  max-height: 16rem;
+  overflow: hidden;
+}
+.steps-viewport[data-expanded] {
+  max-height: none;
+}
+.steps-viewport[data-overflow] {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 2.5rem), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 2.5rem), transparent 100%);
+}
+
+/* ---- thinking slate: a one-line panel whose height never changes while
+   collapsed (thought swaps never move the breathing frame); expanding
+   glides it open to the full reasoning ---- */
+.thinking-slate {
+  position: relative;
+  overflow: hidden;
+}
+.thinking-exit {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* ---- semantic step stack: rows roll in with motion tweens (height opens,
+   then the content materializes); depth dimming lives on this parent layer
+   so rows that shift position re-dim with a transition instead of a jump ---- */
+.step-depth {
+  opacity: var(--step-opacity, 1);
+  transition: opacity 0.5s ease;
+}
+
+/* ---- breathing gradient border for the running status card ---- */
+.live-border {
+  position: relative;
+  border-radius: 12px;
+  padding: 1px;
+  background: var(--line);
+}
+.live-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    120deg,
+    var(--accent),
+    var(--hue-violet),
+    var(--info),
+    var(--accent)
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: border-breathe 2.8s ease-in-out infinite;
+  pointer-events: none;
+}
+/* dark theme: the running card glows faintly behind the breathing border */
+.dark .live-border {
+  box-shadow: 0 0 28px rgba(129, 140, 248, 0.12);
+}
+@keyframes border-breathe {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+/* ---- activity timeline rail (Details drawer) ---- */
+.timeline {
+  position: relative;
+}
+.timeline::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 8px;
+  bottom: 8px;
+  width: 1px;
+  background: var(--line-strong);
+  opacity: 0.55;
+}
+
+/* ---- one-shot highlight when anchoring to an action card ---- */
+@keyframes anchor-flash {
+  0% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  25% {
+    box-shadow: 0 0 0 3px var(--accent-soft), 0 0 0 1px var(--accent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+.animate-anchor-flash {
+  animation: anchor-flash 1.6s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-slide-up { animation: none; }
+  .text-shine,
+  .animate-reveal,
+  .animate-anchor-flash,
+  .animate-sub-drawer-in,
+  .animate-xfade-in,
+  .animate-xfade-out,
+  .animate-answer-in,
+  .live-border::before {
+    animation: none;
+  }
+  /* crossfade height glide and depth re-dimming fall flat too */
+  .xfade,
+  .step-depth {
+    transition: none;
+  }
+  /* grow-in relies on its animation to reach 1fr — force the end state */
+  .grow-in {
+    animation: none;
+    grid-template-rows: 1fr;
+  }
+}
+
+/* ---- rich code block frame (CodeBlockRegistry renderers: Mermaid, TikZ,
+   question fences, …) — a labeled plate with a diagram/source toggle; the
+   source stays visible on failure next to the bounded error ---- */
+.cb-frame {
+  margin: 0.6em 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-elev);
+}
+.cb-frame-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+.cb-frame-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--fg-faint);
+}
+.cb-frame-toggle {
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.cb-frame-toggle:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+.cb-frame-error {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+}
+.cb-frame-loading {
+  padding: 10px 12px;
+  color: var(--fg-faint);
+  font-size: 12px;
+}
+/* element-qualified so it outranks the generic .md-body pre rules */
+pre.cb-frame-source {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: none;
+  border-radius: 0;
+  background: var(--bg);
+}
+.cb-diagram {
+  padding: 12px;
+  overflow-x: auto;
+}
+.cb-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+.cb-frame-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.cb-frame-zoom {
+  min-width: 44px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- accepted-but-uninstalled inbox item: the user bubble with a dashed
+   accent outline — between the local echo and the formal row ---- */
+.bubble-pending {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.dark .bubble-pending {
+  border-color: rgba(129, 140, 248, 0.45);
+}
+
+/* ---- local interface preferences (Interface settings page) ----
+   App.tsx sets --font-sans/--font-mono/--ui-font-size/--ui-line-height/
+   --ui-density on <html> from the persisted ui prefs; the fallbacks below are
+   exactly the base theme, so an untouched client renders identically. */
+body {
+  font-size: var(--ui-font-size, 14px);
+  line-height: var(--ui-line-height, 1.5);
+}
+/* Markdown bodies keep their roomier reading rhythm relative to the pref. */
+.md-body {
+  font-size: var(--ui-font-size, 14px);
+  line-height: calc(var(--ui-line-height, 1.5) + 0.15);
+}
+/* Tailwind v4 derives every spacing utility from --spacing. */
+:root {
+  --spacing: calc(0.25rem * var(--ui-density, 1));
+}
+/* Blanket motion kill-switch for non-motion-library CSS animations. */
+.inspector-adjacent {
+  left: 0;
+  right: var(--parent-width);
+}
+@media (max-width: 1000px) {
+  .inspector-adjacent {
+    left: auto;
+    right: 0;
+    width: min(640px, 96vw);
+  }
+}
+
+.ui-reduced-motion *,
+.ui-reduced-motion *::before,
+.ui-reduced-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* ============================================
+   Inline Question Markdown Styles
+   ============================================ */
+
+.md-inline-question {
+  font-size: inherit;
+  line-height: 1.5;
+  color: var(--fg);
+}
+
+.md-inline-question p {
+  margin: 0;
+  display: inline;
+}
+
+.md-inline-question p + p {
+  display: block;
+  margin-top: 0.5em;
+}
+
+.md-inline-question strong {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.md-inline-question em {
+  font-style: italic;
+  color: var(--fg-muted);
+}
+
+.md-inline-question code {
+  padding: 0.125rem 0.375rem;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  font-size: 0.9em;
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+.md-inline-question ul,
+.md-inline-question ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+
+.md-inline-question li {
+  margin: 0.25em 0;
+}
+
+.md-inline-question li::marker {
+  color: var(--fg-faint);
+}
+
+/* Question code blocks - compact */
+.md-inline-question pre {
+  margin: 0.5em 0;
+  padding: 0.5rem;
+  font-size: 0.85em;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  overflow-x: auto;
+}
+
+.md-inline-question pre code {
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: inherit;
+}
+
+/* Question links */
+.md-inline-question a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.md-inline-question a:hover {
+  color: var(--accent-strong);
+}
+
+/* ============================================
+   Question Comment Styles
+   ============================================ */
+
+.question-comment {
+  display: flex;
+  align-items: start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: linear-gradient(
+    135deg,
+    rgba(var(--accent-rgb), 0.02) 0%,
+    rgba(var(--accent-rgb), 0.04) 100%
+  );
+  border-left: 2px solid rgba(var(--accent-rgb), 0.25);
+  border-radius: 0 8px 8px 0;
+}
+
+.question-comment-text {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* Question option hover and selection styles */
+.question-option {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.question-option:hover:not(.question-option-selected) {
+  box-shadow: 0 0 0 1px rgba(var(--accent-rgb), 0.2),
+              0 0 12px rgba(var(--accent-rgb), 0.08);
+}
+
+.question-option-selected {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1),
+              0 0 0 1px rgba(var(--accent-rgb), 0.4),
+              0 0 16px rgba(var(--accent-rgb), 0.15);
+}
+

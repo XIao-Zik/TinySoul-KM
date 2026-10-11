@@ -1,0 +1,51 @@
+[llm.models.kimi_k2_7]
+family = "kimi"
+collapsed = false
+adapter = "kimi"
+providers = [
+  { provider = "orca", provider_model = "kimi/kimi-k2.7-code" },
+  { provider = "kimi", provider_model = "kimi-k2.7-code-highspeed" },
+]
+context_window_tokens = 262144
+capabilities = [
+  "text_input",
+  "image_input",
+  "json_object_output",
+  "tool_calling",
+  "reasoning_output",
+  "prompt_cache",
+]
+
+[llm.models.kimi_k2_7.adapter_options]
+protocol = "k2"
+reasoning_keep = "content"
+thinking = "enabled"
+
+[llm.models.kimi_k2_7.request_overrides]
+temperature = 1.0
+
+[llm.models.kimi_k3]
+family = "kimi"
+collapsed = false
+adapter = "kimi"
+providers = [
+  { provider = "orca", provider_model = "kimi/kimi-k3" },
+  { provider = "kimi", provider_model = "kimi-k3" },
+]
+context_window_tokens = 1048576
+capabilities = [
+  "text_input",
+  "image_input",
+  "json_object_output",
+  "tool_calling",
+  "reasoning_output",
+  "prompt_cache",
+]
+
+[llm.models.kimi_k3.adapter_options]
+protocol = "k3"
+reasoning_keep = "content"
+reasoning_effort = "max"
+
+[llm.models.kimi_k3.request_overrides]
+temperature = 1.0

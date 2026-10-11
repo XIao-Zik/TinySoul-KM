@@ -1,0 +1,1205 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import date as CalendarDate
+from pathlib import Path
+
+import pytest
+
+from tests.support.model_uses import action_tasks
+from tinysoul.infra.config import ConfigError
+from tinysoul.infra.json import JsonObject, dumps_json
+from tinysoul.infra.references import ReferenceResolver
+from tinysoul.infra.time import CalendarDay
+from tinysoul.kernel.action.call import ActionCall, ActionExecution
+from tinysoul.kernel.action.catalog.catalog import ActionCatalog
+from tinysoul.kernel.action.catalog.specs import (
+    ActionDomainSpec,
+    ActionExecutionSpec,
+    ActionRuntimeSpec,
+    ActionSemanticSpec,
+    ActionSpec,
+    ActionToolSpec,
+)
+from tinysoul.kernel.action.execution.executor import ActionExecutionContext
+from tinysoul.kernel.action.execution.preparation import ActionExecutionBuilder
+from tinysoul.kernel.context import (
+    ContextEngineBuilder,
+    PromptReferenceError,
+)
+from tinysoul.kernel.loop import TurnPreparationRequest
+from tinysoul.kernel.retrieval.contracts import (
+    OperationKind,
+    QuerySource,
+    ResourceScope,
+    ResourceScopeKind,
+    RetrievalRequest,
+    SearchFailure,
+    SearchFailureKind,
+    SourceKind,
+    TextQuery,
+)
+from tinysoul.kernel.retrieval.operations import SearchSession
+from tinysoul.kernel.retrieval.policy import RetrievalPolicy
+from tinysoul.llm.protocol.messages import ImagePart, TextPart, UserMessage
+from tinysoul.llm.protocol.requests import TaskCall
+from tinysoul.llm.protocol.responses import (
+    AnswerFormat,
+    JsonAnswer,
+    RawResponse,
+    TaskFailure,
+    TaskResult,
+    TextAnswer,
+)
+from tinysoul.plugins.workspace import (
+    WorkspaceAnalysisSettings,
+    WorkspaceContractError,
+    WorkspaceEngineBuilder,
+    WorkspaceManifest,
+    WorkspacePromptInput,
+    WorkspacePromptReferenceResolver,
+    WorkspaceReconcileStatus,
+    WorkspaceRef,
+    WorkspaceResourceKind,
+    WorkspaceSearchSettings,
+    WorkspaceSettings,
+    WorkspaceTextSlice,
+    parse_workspace_settings,
+)
+from tinysoul.plugins.workspace.actions import (
+    WorkspaceAnalyzeExecutor,
+    WorkspaceExecutor,
+)
+from tinysoul.plugins.workspace.engine import WORKSPACE_SEARCH_FILTERS, WorkspaceEngine
+from tinysoul.plugins.workspace.inspection.search import WorkspaceTextMatcher
+from tinysoul.plugins.workspace.projection import (
+    WorkspaceTurnPreparationHandler,
+    workspace_segment_registration,
+)
+from tinysoul.plugins.workspace.runtime_bridge import RuntimeWorkspaceBridge
+from tinysoul.plugins.workspace.services import WorkspaceService
+from tinysoul.plugins.workspace.storage.manifest import WorkspaceManifestStore
+from tinysoul.runtime import RunLevel, RunScope, SignalBus
+
+DAY = CalendarDay.parse("2026-07-12")
+
+
+class FakeLLMRunner:
+    def __init__(
+        self,
+        answer: JsonObject | None = None,
+        on_run: Callable[[], None] | None = None,
+        failure: TaskFailure | None = None,
+    ) -> None:
+        self.calls: list[TaskCall] = []
+        self.answer = answer or {"text": "new text"}
+        self.on_run = on_run
+        self.failure = failure
+
+    async def invoke(self, call: TaskCall) -> TaskResult:
+        return await self.run(call)
+
+    async def run(self, call: TaskCall) -> TaskResult:
+        self.calls.append(call)
+        if self.on_run is not None:
+            self.on_run()
+        raw_response = RawResponse(
+            answer_text="{}",
+            model_id="fake",
+            provider_id="fake",
+        )
+        if self.failure is not None:
+            return TaskResult.failure_result(
+                raw_response=raw_response,
+                failure=self.failure,
+            )
+        if call.settings.answer_format is AnswerFormat.TEXT:
+            text = self.answer.get("text")
+            assert isinstance(text, str)
+            answer = TextAnswer(text)
+        else:
+            answer = JsonAnswer(self.answer)
+        return TaskResult.success(
+            raw_response=raw_response,
+            answer=answer,
+            tool_calls=(),
+        )
+
+
+def test_workspace_settings_parse_search_and_analysis_tables(tmp_path: Path) -> None:
+    settings = parse_workspace_settings(
+        {
+            "search": {
+                "max_scan_chars": 1234,
+                "max_query_chars": 321,
+            },
+            "analysis": {
+                "max_reference_refs": 3,
+                "max_source_chars": 6000,
+                "max_chars_per_reference": 2000,
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    assert settings.search.max_scan_chars == 1234
+    assert settings.search.max_query_chars == 321
+    assert settings.analysis.max_reference_refs == 3
+    assert settings.analysis.max_source_chars == 6000
+    assert settings.analysis.max_chars_per_reference == 2000
+
+
+def test_workspace_settings_reject_unknown_nested_key(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError) as exc_info:
+        parse_workspace_settings(
+            {"search": {"semantic_provider": "implicit"}},
+            project_root=tmp_path,
+        )
+
+    assert exc_info.value.key == "workspace.search.semantic_provider"
+
+
+def test_workspace_document_read_is_bounded(local_tmp: Path) -> None:
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(root=(local_tmp / "workspace").resolve())
+    ).build()
+    source = engine.root / "report.pdf"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"%PDF-test")
+    engine.reconcile()
+
+    document = engine.read_document("workspace:report.pdf", max_bytes=100)
+
+    assert document.data == b"%PDF-test"
+    assert document.suffix == ".pdf"
+    with pytest.raises(WorkspaceContractError, match="exceeds the read limit"):
+        engine.read_document("workspace:report.pdf", max_bytes=2)
+
+
+def test_workspace_link_rejects_unsafe_paths() -> None:
+    assert str(WorkspaceRef.parse("workspace:docs/a.md")) == "workspace:docs/a.md"
+    with pytest.raises(WorkspaceContractError):
+        WorkspaceRef.parse("file:docs/a.md")
+    with pytest.raises(WorkspaceContractError):
+        WorkspaceRef.parse("workspace:../secret.md")
+    with pytest.raises(WorkspaceContractError):
+        WorkspaceRef.parse("workspace:C:/secret.md")
+
+
+def test_workspace_scan_manifest_file_does_not_hide_root(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("hello", encoding="utf-8")
+    manifest_path = tmp_path / "workspace_manifest.json"
+    WorkspaceManifestStore(manifest_path).save(WorkspaceManifest())
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(root=tmp_path, manifest_path=manifest_path)
+    ).build()
+
+    result = engine.reconcile()
+
+    assert [resource.ref for resource in result.resources] == ["workspace:a.md"]
+    assert all(
+        item.ref != "workspace:workspace_manifest.json" for item in result.resources
+    )
+
+
+def test_workspace_scan_reports_limit_reached(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("a", encoding="utf-8")
+    (tmp_path / "b.md").write_text("b", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+            max_files=1,
+        )
+    ).build()
+
+    result = engine.reconcile()
+
+    assert [resource.ref for resource in result.resources] == ["workspace:a.md"]
+    assert result.limit_reached is True
+    assert result.status is WorkspaceReconcileStatus.INCOMPLETE
+    assert engine.load_manifest().resources == ()
+
+
+def test_workspace_classifies_prompt_access_kinds(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("hello", encoding="utf-8")
+    (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "report.pdf").write_bytes(b"%PDF")
+    (tmp_path / "archive.bin").write_bytes(b"\x00\x01")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+
+    records = {record.ref: record for record in engine.reconcile().manifest.resources}
+
+    assert records["workspace:a.md"].kind is WorkspaceResourceKind.TEXT
+    assert records["workspace:image.png"].kind is WorkspaceResourceKind.IMAGE
+    assert records["workspace:report.pdf"].kind is WorkspaceResourceKind.DOCUMENT
+    assert records["workspace:archive.bin"].kind is WorkspaceResourceKind.BINARY
+
+
+async def test_workspace_prompt_resolver_loads_images_and_rejects_documents(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "report.pdf").write_bytes(b"%PDF")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+    resolver = WorkspacePromptReferenceResolver(WorkspaceService(engine))
+
+    blocks = await resolver.resolve_reference("workspace:image.png")
+
+    assert any(isinstance(part, ImagePart) for part in blocks[0].message.parts)
+    with pytest.raises(PromptReferenceError) as raised:
+        await resolver.resolve_reference("workspace:report.pdf")
+    assert raised.value.reason == "conversion_required"
+
+
+async def test_workspace_prompt_resolver_rejects_image_with_invalid_signature(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "image.png").write_bytes(b"not a png")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+    resolver = WorkspacePromptReferenceResolver(WorkspaceService(engine))
+
+    with pytest.raises(PromptReferenceError) as raised:
+        await resolver.resolve_reference("workspace:image.png")
+
+    assert raised.value.reason == "invalid_image_resource"
+
+
+async def test_workspace_turn_preparation_projects_manifest_into_context(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("hello", encoding="utf-8")
+    workspace = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+    workspace.initialize_day(DAY)
+    context = ContextEngineBuilder(system_text="system").build()
+    context.register_segment(workspace_segment_registration(workspace))
+    turn_id = context.begin_turn("hello", turn_id="2026-07-12/297")
+    await context.open_segments(DAY.value)
+    scope = RunScope().push(RunLevel.AGENT, "program").push(RunLevel.TURN, turn_id)
+    bus = SignalBus()
+    handler = WorkspaceTurnPreparationHandler(
+        workspace,
+        runtime_bridge=RuntimeWorkspaceBridge(),
+    )
+
+    for signal in await handler.prepare(
+        TurnPreparationRequest(
+            turn_id=turn_id,
+            turn_input="hello",
+            active_day=DAY,
+            scope=scope,
+        )
+    ):
+        bus.emit(signal)
+    assert await context.consume_signals(bus) == ()
+
+    working = context.segment_snapshot("workspace")
+    assert working["resources"] == [
+        {"ref": "workspace:a.md", "summary": "Markdown text, 5 bytes"}
+    ]
+
+
+def test_workspace_read_text_returns_bounded_text(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("abcdef", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+
+    result = engine.read_text("workspace:a.md", max_chars=3)
+
+    assert result.ref == "workspace:a.md"
+    assert result.text == "abc"
+    assert result.truncated is True
+    assert engine.load_manifest().resources == ()
+
+
+def test_workspace_read_text_rejects_non_positive_limit(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("abcdef", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+
+    with pytest.raises(WorkspaceContractError, match="positive"):
+        engine.read_text("workspace:a.md", max_chars=0)
+
+
+def test_workspace_prepare_task_input_renders_bounded_resources(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("abcdef", encoding="utf-8")
+    (tmp_path / "b.md").write_text("xyz", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+
+    task_input = engine.prepare_task_input(
+        ("workspace:a.md", "workspace:b.md"),
+        max_chars_per_resource=3,
+    )
+
+    assert isinstance(task_input, WorkspacePromptInput)
+    assert len(task_input.slices) == 2
+    assert isinstance(task_input.slices[0], WorkspaceTextSlice)
+    assert task_input.slices[0].range_label == "prefix:3"
+    assert task_input.truncated is True
+    rendered = task_input.render()
+    assert "workspace:a.md" in rendered
+    assert "abc" in rendered
+    assert "workspace:b.md" in rendered
+
+
+async def test_workspace_prompt_reference_resolver_returns_prefix_block(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("abcdef", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+            max_read_chars=3,
+        )
+    ).build()
+    resolver = WorkspacePromptReferenceResolver(WorkspaceService(engine))
+
+    blocks = await resolver.resolve_reference("workspace:a.md")
+
+    assert len(blocks) == 1
+    assert (
+        blocks[0].label
+        == "task_prompt:input:workspace:reference:workspace:a.md:prefix:3"
+    )
+    text = _message_text(blocks[0].message)
+    assert "# Workspace Reference" in text
+    assert "ref: workspace:a.md" in text
+    assert "abc" in text
+    assert "truncated: true" in text
+
+
+async def test_workspace_prompt_reference_resolver_returns_target_block(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("abcdef", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+            max_read_chars=3,
+        )
+    ).build()
+    resolver = WorkspacePromptReferenceResolver(WorkspaceService(engine))
+
+    blocks = await resolver.resolve_target("workspace:a.md")
+
+    assert len(blocks) == 1
+    assert (
+        blocks[0].label == "task_prompt:input:workspace:target:workspace:a.md:prefix:3"
+    )
+    text = _message_text(blocks[0].message)
+    assert "# Workspace Target" in text
+    assert "ref: workspace:a.md" in text
+    assert "abc" in text
+    assert "truncated: true" in text
+
+
+def test_workspace_read_text_range_continues_inside_long_line(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("abcdef\nsecond\n", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(root=tmp_path, max_read_chars=4)
+    ).build()
+
+    first = engine.read_text_range(
+        "workspace:a.md",
+        start_line=1,
+        end_line=1,
+        max_chars=3,
+    )
+    second = engine.read_text_range(
+        "workspace:a.md",
+        start_line=1,
+        end_line=1,
+        cursor=first.page.next_cursor or 0,
+        max_chars=10,
+    )
+
+    assert first.page.text == "abc"
+    assert first.page.truncated is True
+    assert first.page.next_cursor == 3
+    assert first.page.next_position is not None
+    assert (first.page.next_position.line, first.page.next_position.column) == (1, 4)
+    assert second.page.text == "def\n"
+    assert second.page.truncated is False
+    assert second.max_chars == 4
+
+
+def test_workspace_read_text_range_normalizes_crlf_unicode_and_reports_eof(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.txt").write_bytes("alpha\r\n中文".encode())
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    engine.reconcile()
+
+    result = engine.read_text_range(
+        "workspace:a.txt",
+        start_line=2,
+        end_line=2,
+    )
+
+    assert result.page.text == "中文"
+    assert result.page.actual_start is not None
+    assert result.page.actual_start.line == 2
+    assert result.page.actual_start.column == 1
+    assert result.page.actual_end is not None
+    assert result.page.actual_end.column == 2
+    assert result.page.eof_reached is True
+    assert result.page.truncated is False
+
+
+async def test_workspace_read_action_returns_foldable_text_range(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(root=tmp_path, max_read_chars=7)
+    ).build()
+
+    result = await _executor(engine).execute(
+        _execution(
+            "workspace.read",
+            {"ref": "workspace:a.md", "start_line": 2, "end_line": 3},
+        ),
+        ActionExecutionContext(),
+    )
+
+    assert result.status.value == "success"
+    assert result.payload["text"] == "two\nthr"
+    assert result.payload["truncated"] is True
+    assert result.trace_projection is not None
+    assert result.trace_projection.origin_refs == ("workspace:a.md",)
+    assert "text" not in result.trace_projection.canonical_payload
+
+
+def _search_service(engine: WorkspaceEngine) -> WorkspaceService:
+    async def source(request):
+        return engine.retrieval_corpus(request, references=ReferenceResolver())
+
+    queries = SearchSession(
+        action_id="workspace.search",
+        retrieval_policies=(
+            RetrievalPolicy(
+                "workspace.search", tuple(SourceKind), tuple(OperationKind)
+            ),
+        ),
+        source=source,
+        filters=WORKSPACE_SEARCH_FILTERS,
+        lexical=WorkspaceTextMatcher(engine.settings.search).match,
+    )
+    return WorkspaceService(engine, queries=queries)
+
+
+async def test_workspace_search_scopes_and_preserves_all_members_for_paging(
+    tmp_path: Path,
+):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src2").mkdir()
+    (tmp_path / "src/a.py").write_text("before\nneedle\nafter\n", encoding="utf-8")
+    (tmp_path / "src/b.py").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "src2/c.py").write_text("needle\n", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    service = _search_service(engine)
+    page = await service.search(
+        RetrievalRequest(
+            QuerySource(
+                ResourceScope(ResourceScopeKind.DIRECTORY, "workspace:src/"),
+                TextQuery("^needle$"),
+                regex=True,
+            ),
+            page_limit=1,
+        )
+    )
+    assert page.coverage.source_complete and page.coverage.final_count == 2
+    assert page.items[0].ref == "workspace:src/a.py"
+    assert "needle" in page.items[0].fragments[0].text
+    assert page.continuation
+    next_page = await service.search(page.continuation)
+    assert [item.ref for item in next_page.items] == ["workspace:src/b.py"]
+
+
+@pytest.mark.parametrize(
+    ("prefix", "word", "query"),
+    [
+        ("x" * 1998, "needle", "needle"),
+        ("ß" * 700, "Needle", "needle"),
+        ("x" * 700, "Straße", "STRASSE"),
+    ],
+)
+async def test_workspace_original_match_offsets_survive_content_partition(
+    tmp_path: Path, prefix: str, word: str, query: str
+):
+    text = prefix + word + "z" * 700
+    (tmp_path / "a.txt").write_text(text, encoding="utf-8")
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    page = await _search_service(engine).search(
+        RetrievalRequest(
+            QuerySource(
+                ResourceScope(ResourceScopeKind.FILE, "workspace:a.txt"),
+                TextQuery(query),
+            )
+        )
+    )
+    candidate = page.items[0].candidate
+    units = {unit.id: unit for unit in candidate.content_units}
+    hits = candidate.evidence
+    assert "".join(units[hit.unit_id].text[hit.start : hit.end] for hit in hits) == word
+    first = hits[0]
+    offset = units[first.unit_id].location["offset"]
+    assert isinstance(offset, int) and offset + first.start == len(prefix)
+    assert page.to_json()["items"]
+
+
+async def test_workspace_query_reports_read_budget_and_honors_exclusions_first(
+    tmp_path: Path,
+):
+    (tmp_path / "a.md").write_text("x" * 20 + "needle", encoding="utf-8")
+    (tmp_path / "b.md").write_text("needle", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path, search=WorkspaceSearchSettings(max_scan_chars=10)
+        )
+    ).build()
+    service = _search_service(engine)
+    source = QuerySource(
+        ResourceScope(ResourceScopeKind.WORKSPACE), TextQuery("needle")
+    )
+    with pytest.raises(SearchFailure) as failure:
+        await service.search(RetrievalRequest(source))
+    assert failure.value.kind is SearchFailureKind.SCOPE_REQUIRED
+    page = await service.search(
+        RetrievalRequest(source, exclude_refs=("workspace:a.md",))
+    )
+    assert [item.ref for item in page.items] == ["workspace:b.md"]
+
+
+async def test_workspace_unreadable_text_is_not_a_complete_empty_result(tmp_path: Path):
+    from tinysoul.plugins.workspace.errors import WorkspaceIOError
+
+    (tmp_path / "a.txt").write_bytes(bytes([255, 254]))
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    with pytest.raises(WorkspaceIOError):
+        await _search_service(engine).search(
+            RetrievalRequest(
+                QuerySource(
+                    ResourceScope(ResourceScopeKind.WORKSPACE), TextQuery("needle")
+                )
+            )
+        )
+
+
+async def test_workspace_search_action_returns_foldable_fragments(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("needle\n", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    engine.reconcile()
+
+    result = await _executor(engine).execute(
+        _execution(
+            "workspace.search",
+            {
+                "source": {
+                    "kind": "query",
+                    "scope": {"kind": "file", "ref": "workspace:a.md"},
+                    "query": "needle",
+                },
+            },
+        ),
+        ActionExecutionContext(),
+    )
+
+    assert result.status.value == "success"
+    expected_scope = {"kind": "file", "ref": "workspace:a.md"}
+    assert result.payload["scope"] == expected_scope
+    items = result.payload["items"]
+    assert isinstance(items, list)
+    item = items[0]
+    assert isinstance(item, dict)
+    assert item["ref"] == "workspace:a.md"
+    evidence = item.get("evidence")
+    assert isinstance(evidence, list) and evidence
+    first_evidence = evidence[0]
+    assert isinstance(first_evidence, dict)
+    assert first_evidence.get("text") == "needle\n"
+    assert result.trace_projection is not None
+    compact = result.trace_projection.canonical_payload
+    assert compact["source"] == "query"
+    assert compact["selected"] == [
+        {"ref": "workspace:a.md", "title": "a.md", "excerpt": "needle\n"}
+    ]
+
+
+async def test_workspace_search_action_rejects_legacy_scope_shape(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("needle\n", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    engine.reconcile()
+
+    result = await _executor(engine).execute(
+        _execution(
+            "workspace.search",
+            {
+                "query": "needle",
+                "scope": {"kind": "file", "ref": "workspace:a.md"},
+            },
+        ),
+        ActionExecutionContext(),
+    )
+
+    assert result.status.value == "failed"
+    assert result.failure is not None
+    assert result.failure.reason == "invalid_request"
+
+
+async def test_workspace_analyze_returns_grounded_standard_result(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("alpha\n", encoding="utf-8")
+    (tmp_path / "b.md").write_text("beta\n", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    context_engine = ContextEngineBuilder(system_text="system").build()
+    context_engine.begin_turn("analyze files", turn_id="2026-07-12/695")
+    await context_engine.open_segments(CalendarDate(2026, 7, 12))
+    llm = FakeLLMRunner(
+        answer={"answer": "Alpha and beta are present.", "source_ids": ["source_1"]}
+    )
+    executor = WorkspaceAnalyzeExecutor(
+        workspace=WorkspaceService(engine),
+        tasks=action_tasks(context_engine),
+        llm=llm,
+    )
+    before = engine.reconcile().manifest
+
+    result = await executor.execute(
+        _execution(
+            "workspace.analyze",
+            {
+                "intent": "Compare the files.",
+                "references": ["workspace:a.md", "workspace:b.md"],
+            },
+        ),
+        ActionExecutionContext(),
+    )
+
+    assert result.status.value == "success"
+    assert result.payload["answer"] == "Alpha and beta are present."
+    assert result.payload["sources"] == [
+        {
+            "source_id": "source_1",
+            "ref": "workspace:a.md",
+            "size": engine.stat("workspace:a.md").size,
+            "range": {"start_line": 1, "end_line": 1},
+        }
+    ]
+    assert result.trace_projection is None
+    assert engine.load_manifest() == before
+    assert len(llm.calls) == 1
+    assert "alpha" in _task_call_text_for_label(
+        llm.calls[0], "task_prompt:input:workspace:analysis:source_1"
+    )
+
+
+async def test_workspace_analyze_budget_failure_does_not_call_llm(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("abcdef", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            analysis=WorkspaceAnalysisSettings(
+                max_chars_per_reference=5,
+                max_source_chars=10,
+            ),
+        )
+    ).build()
+    context_engine = ContextEngineBuilder(system_text="system").build()
+    context_engine.begin_turn("analyze files", turn_id="2026-07-12/750")
+    await context_engine.open_segments(CalendarDate(2026, 7, 12))
+    llm = FakeLLMRunner(answer={"answer": "unused", "source_ids": ["source_1"]})
+
+    result = await WorkspaceAnalyzeExecutor(
+        workspace=WorkspaceService(engine),
+        tasks=action_tasks(context_engine),
+        llm=llm,
+    ).execute(
+        _execution(
+            "workspace.analyze",
+            {"intent": "Analyze.", "references": ["workspace:a.md"]},
+        ),
+        ActionExecutionContext(),
+    )
+
+    assert result.status.value == "failed"
+    assert result.payload["reason"] == "reference_chars_exceeded"
+    assert result.payload["offending_ref"] == "workspace:a.md"
+    assert llm.calls == []
+
+
+async def test_workspace_analyze_rejects_invented_source_id(tmp_path: Path) -> None:
+    (tmp_path / "a.md").write_text("alpha", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    context_engine = ContextEngineBuilder(system_text="system").build()
+    context_engine.begin_turn("analyze files", turn_id="2026-07-12/776")
+    await context_engine.open_segments(CalendarDate(2026, 7, 12))
+    llm = FakeLLMRunner(answer={"answer": "Invented.", "source_ids": ["source_99"]})
+
+    result = await WorkspaceAnalyzeExecutor(
+        workspace=WorkspaceService(engine),
+        tasks=action_tasks(context_engine),
+        llm=llm,
+    ).execute(
+        _execution(
+            "workspace.analyze",
+            {"intent": "Analyze.", "references": ["workspace:a.md"]},
+        ),
+        ActionExecutionContext(),
+    )
+
+    assert result.status.value == "failed"
+    assert result.failure is not None
+    assert result.failure.reason == "unknown_analysis_source_ids"
+
+
+async def test_workspace_analyze_requires_at_least_one_grounding_source(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("alpha", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    context_engine = ContextEngineBuilder(system_text="system").build()
+    context_engine.begin_turn("analyze files", turn_id="2026-07-12/803")
+    await context_engine.open_segments(CalendarDate(2026, 7, 12))
+    llm = FakeLLMRunner(answer={"answer": "Alpha is present.", "source_ids": []})
+
+    result = await WorkspaceAnalyzeExecutor(
+        workspace=WorkspaceService(engine),
+        tasks=action_tasks(context_engine),
+        llm=llm,
+    ).execute(
+        _execution(
+            "workspace.analyze",
+            {"intent": "Analyze.", "references": ["workspace:a.md"]},
+        ),
+        ActionExecutionContext(),
+    )
+
+    assert result.status.value == "failed"
+    assert result.failure is not None
+    assert result.failure.reason == "invalid_analysis_source_ids"
+
+
+def test_workspace_write_text_creates_resource_and_manifest(tmp_path: Path) -> None:
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+
+    record = engine.write_text("workspace:docs/a.md", "hello")
+
+    assert (tmp_path / "docs" / "a.md").read_text(encoding="utf-8") == "hello"
+    assert record.ref == "workspace:docs/a.md"
+    assert record.size == 5
+    assert {item.ref for item in engine.load_manifest().resources} == {
+        "workspace:docs",
+        "workspace:docs/a.md",
+    }
+
+
+def test_workspace_write_text_rejects_existing_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.md").write_text("old", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+
+    with pytest.raises(WorkspaceContractError, match="already exists"):
+        engine.write_text("workspace:a.md", "new")
+
+
+def test_workspace_write_text_rejects_ignored_parent(tmp_path: Path) -> None:
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+
+    with pytest.raises(WorkspaceContractError):
+        engine.write_text("workspace:.git/config", "unsafe")
+
+
+def test_workspace_prepare_task_input_rejects_empty_links(tmp_path: Path) -> None:
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(
+            root=tmp_path,
+            manifest_path=tmp_path / ".tinysoul" / "workspace_manifest.json",
+        )
+    ).build()
+
+    with pytest.raises(WorkspaceContractError):
+        engine.prepare_task_input(())
+
+
+def test_workspace_describe_rejects_internal_manifest(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "workspace_manifest.json"
+    WorkspaceManifestStore(manifest_path).save(WorkspaceManifest())
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(root=tmp_path, manifest_path=manifest_path)
+    ).build()
+
+    with pytest.raises(WorkspaceContractError, match="internal"):
+        engine.stat("workspace:workspace_manifest.json")
+
+
+def _message_text(message: UserMessage) -> str:
+    return "\n".join(part.text for part in message.parts if isinstance(part, TextPart))
+
+
+def _task_call_text_for_label(call: TaskCall, label: str) -> str:
+    for message in call.messages.messages:
+        if message.label != label:
+            continue
+        return "\n".join(
+            part.text for part in message.parts if isinstance(part, TextPart)
+        )
+    raise AssertionError(f"Missing message label: {label}")
+
+
+def _execution(action_name: str, params: JsonObject) -> ActionExecution:
+    catalog = ActionCatalog(
+        domains=(ActionDomainSpec(name="workspace", description="Workspace."),),
+        actions=(
+            ActionSpec(
+                name=action_name,
+                domain="workspace",
+                tool=ActionToolSpec(
+                    name=action_name,
+                    description="Scan.",
+                    schema={
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                ),
+                semantic=ActionSemanticSpec(),
+                runtime=ActionRuntimeSpec(),
+                execution=ActionExecutionSpec(
+                    executor=action_name,
+                ),
+            ),
+        ),
+    )
+    preparation = ActionExecutionBuilder().prepare_batch(
+        (ActionCall("call_1", action_name, params, 1),),
+        catalog=catalog,
+        scope=RunScope().push(RunLevel.PHASE, "phase3"),
+        batch_id="batch_1",
+    )
+    return preparation.batch.executions[0]
+
+
+def _executor(engine: WorkspaceEngine) -> WorkspaceExecutor:
+    return WorkspaceExecutor(
+        _search_service(engine),
+        action_tasks(ContextEngineBuilder(system_text="sys").build()),
+        FakeLLMRunner(),
+        RuntimeWorkspaceBridge(),
+    )
+
+
+@pytest.mark.parametrize("overwrite", [False, True])
+async def test_compose_uses_local_sources_and_commits_only_complete_text(
+    tmp_path: Path, overwrite: bool
+) -> None:
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    if overwrite:
+        engine.write_text("workspace:target.md", "old target")
+    engine.write_text("workspace:ref.md", "source evidence")
+    context = ContextEngineBuilder(system_text="system").build()
+    context.begin_turn("compose", turn_id="2026-07-12/959")
+    await context.open_segments(CalendarDate(2026, 9, 19))
+    llm = FakeLLMRunner({"text": "complete result"})
+    bus = SignalBus()
+    executor = WorkspaceExecutor(
+        WorkspaceService(engine),
+        action_tasks(context),
+        llm,
+        RuntimeWorkspaceBridge(),
+    )
+    result = await executor.execute(
+        _execution(
+            "workspace.compose",
+            {
+                "target_ref": "workspace:target.md",
+                "instruction": "Use the evidence.",
+                "references": ["workspace:ref.md"],
+                "overwrite": overwrite,
+            },
+        ),
+        ActionExecutionContext(),
+    )
+    assert result.status.value == "success"
+    assert engine.read_text("workspace:target.md").text == "complete result"
+    assert len(llm.calls) == 1
+    assert "text" not in result.payload
+    assert any(
+        item.ref == "workspace:target.md" for item in engine.snapshot().resources
+    )
+
+
+async def test_compose_rejects_truncated_target_before_generating(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "target.md").write_text("too much text", encoding="utf-8")
+    engine = WorkspaceEngineBuilder(
+        WorkspaceSettings(root=tmp_path, max_write_chars=4)
+    ).build()
+    context = ContextEngineBuilder(system_text="system").build()
+    context.begin_turn("compose", turn_id="2026-07-12/998")
+    await context.open_segments(CalendarDate(2026, 9, 19))
+    llm = FakeLLMRunner({"text": "new"})
+    executor = WorkspaceExecutor(
+        WorkspaceService(engine),
+        action_tasks(context),
+        llm,
+        RuntimeWorkspaceBridge(),
+    )
+    result = await executor.execute(
+        _execution(
+            "workspace.compose",
+            {
+                "target_ref": "workspace:target.md",
+                "instruction": "Change it.",
+                "overwrite": True,
+            },
+        ),
+        ActionExecutionContext(),
+    )
+    assert result.status.value == "failed"
+    assert llm.calls == []
+    assert (tmp_path / "target.md").read_text(encoding="utf-8") == "too much text"
+
+
+async def test_workspace_owner_io_failure_crosses_bridge_without_raw_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tinysoul.plugins.workspace import WorkspaceIOError
+    from tinysoul.runtime import RuntimeException
+
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+
+    def fail_write(*args, **kwargs):
+        raise WorkspaceIOError("private /local/path secret")
+
+    monkeypatch.setattr(engine, "write_text", fail_write)
+    with pytest.raises(RuntimeException) as raised:
+        await _executor(engine).execute(
+            _execution(
+                "workspace.write",
+                {
+                    "target_ref": "workspace:a.md",
+                    "text": "a",
+                },
+            ),
+            ActionExecutionContext(),
+        )
+    assert raised.value.payload["module"] == "workspace"
+    assert "private" not in str(raised.value.payload)
+
+
+def test_workspace_backlinks_read_markdown_edges_without_similarity(
+    tmp_path: Path,
+) -> None:
+    from tinysoul.infra.references import ReferenceResolver, ResourceTarget
+    from tinysoul.kernel.retrieval.contracts import BacklinksSource, RetrievalRequest
+
+    workspace = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    workspace.initialize_day(DAY)
+    workspace.write_text("workspace:target.md", "# Storage\nDurability")
+    workspace.write_text(
+        "workspace:sub/source.md",
+        "[local](../target.md#storage)\n[memory][m]\n\n[m]: <memory:concept/storage>",
+    )
+    workspace.write_text("workspace:similar.md", "Storage durability target, no ref.")
+    refs = ReferenceResolver()
+    refs.bind(
+        {
+            "workspace": workspace.canonical_reference,
+            "memory": lambda resource, fragment, day: ResourceTarget(
+                resource, fragment
+            ),
+        }
+    )
+    for target in (
+        "workspace:target.md",
+        "workspace:target.md#storage",
+        "memory:concept/storage",
+    ):
+        corpus = workspace.retrieval_corpus(
+            RetrievalRequest(
+                BacklinksSource(ResourceScope(ResourceScopeKind.WORKSPACE), target)
+            ),
+            references=refs,
+        )
+        assert [item.ref for item in corpus.candidates] == ["workspace:sub/source.md"]
+        assert corpus.candidates[0].attributes["day"] == str(DAY)
+
+
+def test_analysis_prompt_keeps_dynamic_limits_and_reference_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tinysoul.plugins.workspace.inspection.models import (
+        WorkspaceAnalysisInput,
+        WorkspaceAnalysisReference,
+    )
+    from tinysoul.plugins.workspace.prompts import WorkspaceAnalysisPromptBuilder
+    from tinysoul.prompts.plugins import workspace as prompt_text
+
+    guide = "analysis guide {literal}"
+    body = 'source body: {"answer": "data"}\n{unexpanded}'
+    source_id = "source_17"
+    monkeypatch.setattr(prompt_text, "ANALYSIS_GUIDE", guide)
+    prompt = WorkspaceAnalysisPromptBuilder().build(
+        intent="inspect {literal}",
+        analysis_input=WorkspaceAnalysisInput(
+            references=(
+                WorkspaceAnalysisReference(
+                    source_id, "workspace:a.md", body, len(body), 2
+                ),
+            ),
+            total_chars=len(body),
+        ),
+        max_answer_chars=731,
+    )
+    assert prompt.guide_blocks[0].message.parts == (TextPart(guide),)
+    reference_text = "".join(
+        part.text
+        for part in prompt.input_blocks[1].message.parts
+        if isinstance(part, TextPart)
+    )
+    assert body in reference_text
+    assert source_id in reference_text
+    output = "".join(
+        part.text
+        for part in prompt.output_blocks[0].message.parts
+        if isinstance(part, TextPart)
+    )
+    assert "731" in output
+    assert source_id in output
+    assert all(isinstance(message, UserMessage) for message in prompt.render_messages())
+
+
+async def test_inspect_pages_selected_text_and_keeps_only_read_facts(
+    tmp_path: Path,
+) -> None:
+    from tinysoul.infra.continuation import ContinuationError
+
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    engine.initialize_day(CalendarDay.parse("2026-10-06"))
+    section = "# Selected\n" + "detail " * 1000 + "\n"
+    engine.write_text(
+        "workspace:notes.md", "# Intro\nintro\n" + section + "# Other\nother\n"
+    )
+    params: JsonObject = {"ref": "workspace:notes.md#selected", "max_chars": 2048}
+    result = await _executor(engine).execute(
+        _execution("workspace.inspect", params), ActionExecutionContext()
+    )
+    assert result.status.value == "success"
+    assert result.trace_projection is not None
+    canonical = result.trace_projection.canonical_payload
+    assert canonical["ref"] == params["ref"] and canonical["coverage"]
+    assert "text" not in canonical and section not in str(canonical)
+    first = engine.inspect(str(params["ref"]), max_chars=2048)
+    assert first.model_text == result.model_text
+    texts = [item.unit.text[item.start : item.end] for item in first.items]
+    continuation = first.next_continuation
+    assert continuation is not None
+    while continuation:
+        page = engine.inspect(
+            str(params["ref"]), continuation=continuation, max_chars=2048
+        )
+        assert len(dumps_json(page.to_json())) <= 2048
+        assert len(page.model_text) <= 2048
+        texts.extend(item.unit.text[item.start : item.end] for item in page.items)
+        continuation = page.next_continuation
+    assert "".join(texts) == section
+    engine.write_text("workspace:notes.md", "# Selected\nUpdated.\n", overwrite=True)
+    assert (
+        engine.inspect(str(params["ref"])).items[0].unit.text
+        == "# Selected\nUpdated.\n"
+    )
+    with pytest.raises(ContinuationError):
+        engine.inspect(str(params["ref"]), continuation=first.next_continuation)
+
+
+async def test_inspect_directory_and_nontext_describe_current_resources(
+    tmp_path: Path,
+) -> None:
+    engine = WorkspaceEngineBuilder(WorkspaceSettings(root=tmp_path)).build()
+    engine.initialize_day(CalendarDay.parse("2026-10-06"))
+    engine.write_text("workspace:docs/note.md", "hello")
+    engine.set_description("workspace:docs/note.md", "Meeting notes")
+    page = (engine.inspect("workspace:docs")).to_json()
+    assert "workspace:docs/note.md" in str(page["items"])
+    assert "Meeting notes" in str(page["items"])
+    (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    page = (engine.inspect("workspace:image.png")).to_json()
+    assert page["view"] == "metadata" and "text" not in page
+    executor = _executor(engine)
+    metadata = await executor.execute(
+        _execution("workspace.inspect", {"ref": "workspace:image.png"}),
+        ActionExecutionContext(),
+    )
+    assert metadata.model_text is not None and "image/png" in metadata.model_text
+    assert metadata.trace_projection is not None
+    assert metadata.trace_projection.canonical_payload["view"] == "metadata"
+    directory = await executor.execute(
+        _execution("workspace.inspect", {"ref": "workspace:docs"}),
+        ActionExecutionContext(),
+    )
+    assert directory.trace_projection is not None
+    coverage = directory.trace_projection.canonical_payload["coverage"]
+    assert isinstance(coverage, list) and isinstance(coverage[0], dict)
+    assert coverage[0]["ref"] == "workspace:docs/note.md"
+    assert coverage[0]["title"] and coverage[0]["clue"]

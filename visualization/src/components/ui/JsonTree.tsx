@@ -1,0 +1,140 @@
+import { useState } from "react";
+import { useT } from "../../i18n";
+
+/**
+ * Collapsible, syntax-colored JSON tree. Colors come from the `.json-tree`
+ * classes in the global stylesheet (semantic tokens, theme aware). Nested
+ * levels get a left indent guide; `defaultExpanded` expands the whole tree
+ * (pass false for deliberately collapsed raw/diagnostic views). `defaultDepth`
+ * auto-opens nodes shallower than it (1 = root only), so bounded views can
+ * show the first levels without a click.
+ */
+export function JsonTree({
+  value,
+  defaultExpanded = true,
+  defaultDepth = 1,
+  maxStringLength = 240,
+}: {
+  value: unknown;
+  defaultExpanded?: boolean;
+  defaultDepth?: number;
+  maxStringLength?: number;
+}) {
+  return (
+    <div className="json-tree overflow-x-auto rounded-lg border border-line bg-code-bg p-3">
+      <JsonNode
+        name={undefined}
+        value={value}
+        depth={0}
+        defaultExpanded={defaultExpanded}
+        defaultDepth={defaultDepth}
+        maxStringLength={maxStringLength}
+      />
+    </div>
+  );
+}
+
+interface NodeProps {
+  name: string | undefined;
+  value: unknown;
+  depth: number;
+  defaultExpanded: boolean;
+  defaultDepth: number;
+  maxStringLength: number;
+}
+
+function JsonNode({ name, value, depth, defaultExpanded, defaultDepth, maxStringLength }: NodeProps) {
+  const t = useT();
+  const [open, setOpen] = useState(defaultExpanded || depth < defaultDepth);
+  const isObject = value !== null && typeof value === "object";
+  const entries = isObject
+    ? Array.isArray(value)
+      ? value.map((v, i) => [String(i), v] as const)
+      : Object.entries(value as Record<string, unknown>)
+    : [];
+
+  const keyLabel =
+    name !== undefined ? (
+      <span className="jt-key">{JSON.stringify(name)}</span>
+    ) : null;
+
+  if (!isObject) {
+    return (
+      <div className="jt-row">
+        {keyLabel}
+        {keyLabel && <span className="jt-punct">: </span>}
+        <Primitive value={value} maxStringLength={maxStringLength} />
+      </div>
+    );
+  }
+
+  const isArray = Array.isArray(value);
+  const openBracket = isArray ? "[" : "{";
+  const closeBracket = isArray ? "]" : "}";
+  const summary = isArray
+    ? t("{count} items", { count: entries.length })
+    : t("{count} keys", { count: entries.length });
+
+  return (
+    <div>
+      <span onClick={() => setOpen(!open)} className="jt-row cursor-pointer select-none">
+        <span className={`jt-toggle ${open ? "open" : ""}`}>▸</span>
+        {keyLabel}
+        {keyLabel && <span className="jt-punct">: </span>}
+        <span className="jt-punct">{openBracket}</span>
+        {!open && <span className="jt-null"> … {summary} </span>}
+        {!open && <span className="jt-punct">{closeBracket}</span>}
+      </span>
+      {open && (
+        <>
+          <div className="jt-children">
+            {entries.map(([k, v]) => (
+              <JsonNode
+                key={k}
+                name={k}
+                value={v}
+                depth={depth + 1}
+                defaultExpanded={defaultExpanded}
+                defaultDepth={defaultDepth}
+                maxStringLength={maxStringLength}
+              />
+            ))}
+          </div>
+          <div>
+            <span className="jt-punct">{closeBracket}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Primitive({
+  value,
+  maxStringLength,
+}: {
+  value: unknown;
+  maxStringLength: number;
+}) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  if (value === null || value === undefined) {
+    return <span className="jt-null">null</span>;
+  }
+  if (typeof value === "string") {
+    const truncated = !expanded && value.length > maxStringLength;
+    const shown = truncated ? value.slice(0, maxStringLength) + "…" : value;
+    return (
+      <span
+        className={`jt-string ${value.length > maxStringLength ? "cursor-pointer" : ""}`}
+        title={value.length > maxStringLength ? t("Click to expand/collapse") : undefined}
+        onClick={() => value.length > maxStringLength && setExpanded(!expanded)}
+      >
+        {JSON.stringify(shown)}
+      </span>
+    );
+  }
+  if (typeof value === "number") return <span className="jt-number">{String(value)}</span>;
+  if (typeof value === "boolean") return <span className="jt-boolean">{String(value)}</span>;
+  return <span className="jt-string">{JSON.stringify(value)}</span>;
+}

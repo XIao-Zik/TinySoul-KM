@@ -1,0 +1,21 @@
+name = "home.search"
+domain = "home"
+
+[tool]
+description = "Compose registered query, backlinks, directory, refs, result, filter, select and rerank operations over effective Home. Query/directory aggregate Skill resources; refs read the exact entry or fragment. Results include refs and real content previews; operation models are configured internally."
+schema = { type = "object", properties = { source = { type = "object" }, steps = { type = "array" }, exclude_refs = { type = "array", items = { type = "string" } }, page = { type = "object" } }, required = ["source"], additionalProperties = false }
+
+[semantic]
+use_when = ["Relevant Home agent or Skill resources should be discovered"]
+avoid_when = ["Changing resource content"]
+effects = ["read_only"]
+
+[runtime]
+timeout_seconds = 600
+parallel_policy = "allowed"
+
+[runtime.result]
+trace_mode = "foldable"
+
+[execution]
+executor = "home.search"

@@ -1,0 +1,22 @@
+name = "memory.inspect"
+domain = "memory"
+
+[tool]
+description = "Read a known persistent Memory document in pages, or enumerate its direct references. Does not search backlinks or call a model."
+schema = { type = "object", properties = { ref = { type = "string", minLength = 1 }, view = { type = "string", enum = ["content", "direct_refs"] }, continuation = { type = "string" }, max_chars = { type = "integer", minimum = 1024 } }, required = ["ref"], additionalProperties = false }
+
+[semantic]
+use_when = ["An exact Memory reference should be opened"]
+avoid_when = ["Changing resource content"]
+effects = ["read_only"]
+
+[runtime]
+timeout_seconds = 600
+parallel_policy = "allowed"
+
+[runtime.result]
+trace_mode = "foldable"
+
+[execution]
+executor = "memory.inspect"
+

@@ -1,0 +1,20 @@
+name = "subagent.disconnect"
+domain = "subagent"
+
+[tool]
+description = "Disconnect an idle connection; stop its live Job before disconnecting."
+
+[tool.schema]
+type = "object"
+required = ["connection_id"]
+additionalProperties = false
+
+[tool.schema.properties.connection_id]
+type = "string"
+
+[semantic]
+use_when = ["Disconnect an idle connection; stop its live Job before disconnecting."]
+effects = ["modifying"]
+
+[execution]
+executor = "subagent.disconnect"

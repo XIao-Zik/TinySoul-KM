@@ -1,0 +1,53 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.local-test/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Local references
+reference
+
+# The repository root is not an initialized TinySoul project
+/configs/
+/home/
+/tinysoul.toml
+/.env.example
+
+# Runtime and demo outputs
+/runtime/
+/archive/
+**/.tinysoul_runtime/
+
+# Editor and OS files
+.idea/
+.vscode/
+.zed/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Packaging/build outputs
+build/
+dist/
+*.egg-info/
+prompt.txt
+docs/report/
+labs/
+prompt.md
+temp/

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "JsonObject": {
+      "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+      },
+      "type": "object"
+    },
+    "JsonScalar": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer"
+        },
+        {
+          "type": "number"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "JsonValue": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/JsonScalar"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "properties": {
+    "protocol_version": {
+      "title": "Protocol Version",
+      "type": "integer"
+    },
+    "instance_id": {
+      "title": "Instance Id",
+      "type": "string"
+    },
+    "project_identity": {
+      "title": "Project Identity",
+      "type": "string"
+    },
+    "ready": {
+      "title": "Ready",
+      "type": "boolean"
+    },
+    "active_day": {
+      "title": "Active Day",
+      "type": "string"
+    },
+    "turn_active": {
+      "title": "Turn Active",
+      "type": "boolean"
+    },
+    "runtime": {
+      "$ref": "#/$defs/JsonObject"
+    },
+    "latest_event_sequence": {
+      "title": "Latest Event Sequence",
+      "type": "integer"
+    },
+    "event_journal": {
+      "$ref": "#/$defs/JsonObject"
+    }
+  },
+  "required": [
+    "protocol_version",
+    "instance_id",
+    "project_identity",
+    "ready",
+    "active_day",
+    "turn_active",
+    "runtime",
+    "latest_event_sequence",
+    "event_journal"
+  ],
+  "title": "RuntimeStatusResponse",
+  "type": "object"
+}

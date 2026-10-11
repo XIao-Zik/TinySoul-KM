@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+
+from tests.support.catalog import builtin_action_catalog_root
+from tinysoul.infra.json import JsonObject
+from tinysoul.infra.time import CalendarDay
+from tinysoul.kernel.action import (
+    ActionCall,
+    ActionExecution,
+    ActionExecutionContext,
+    ActionFramework,
+    ActionResultStatus,
+)
+from tinysoul.kernel.action.catalog.loader import ActionCatalogLoader
+from tinysoul.plugins.memory import (
+    EntityMemoryDocument,
+    MemoryEngine,
+    MemorySettings,
+    MemoryStatus,
+)
+from tinysoul.plugins.memory.actions import MemoryWriteExecutor, MemoryWriteSession
+from tinysoul.plugins.memory.services import MemoryKnowledgeService
+from tinysoul.runtime import RunLevel, RunScope
+
+DAY = CalendarDay.parse("2026-08-05")
+
+
+async def test_reflection_commits_one_document_and_preserves_it_after_rejected_write(
+    tmp_path: Path,
+) -> None:
+    memory = MemoryEngine(settings=MemorySettings(root=tmp_path / "memory"))
+    controller = MemoryWriteSession(memory=MemoryKnowledgeService(memory))
+    controller.begin(target_day=DAY)
+    executor = MemoryWriteExecutor(controller)
+    result = await executor.execute(
+        _execution("write_daily", {"markdown": "## Events\n\nReviewed Memory."}),
+        ActionExecutionContext(),
+    )
+    assert result.status is ActionResultStatus.SUCCESS
+    assert result.payload["ref"] == "memory:daily/2026-08-05"
+
+    invalid = await executor.execute(
+        _execution(
+            "write",
+            {
+                "ref": "memory:entity/missing",
+                "markdown": "invalid document",
+            },
+        ),
+        ActionExecutionContext(),
+    )
+    assert invalid.status is ActionResultStatus.FAILED
+    controller.abort()
+    reopened = MemoryEngine(settings=memory.settings)
+    assert reopened.read_daily(DAY) is not None
+    assert not (memory.root / ".tinysoul" / "transactions").exists()
+
+
+async def test_reflection_writes_target_before_redirect_and_rejects_redirect_cycle(
+    tmp_path: Path,
+) -> None:
+    memory = MemoryEngine(settings=MemorySettings(root=tmp_path / "memory"))
+    controller = MemoryWriteSession(memory=MemoryKnowledgeService(memory))
+    controller.begin(target_day=DAY)
+    executor = MemoryWriteExecutor(controller)
+    source = EntityMemoryDocument(
+        cite="source",
+        status=MemoryStatus.ACTIVE,
+        created_on=DAY.value,
+        updated_on=DAY.value,
+        content="Original source.",
+    )
+    target = replace(source, cite="target", content="Replacement entity.")
+    redirected = replace(
+        source,
+        status=MemoryStatus.MERGED,
+        redirect_to=target.ref,
+        content="Merged into memory:entity/target.",
+    )
+
+    async def write(document: EntityMemoryDocument):
+        return await executor.execute(
+            _execution(
+                "write",
+                {
+                    "ref": str(document.ref),
+                    "markdown": memory.render_document(document),
+                },
+            ),
+            ActionExecutionContext(),
+        )
+
+    assert (await write(source)).status is ActionResultStatus.SUCCESS
+    assert (await write(redirected)).status is ActionResultStatus.FAILED
+    assert memory.read_document(source.ref).document == source
+    assert (await write(target)).status is ActionResultStatus.SUCCESS
+    assert (await write(redirected)).status is ActionResultStatus.SUCCESS
+    cycle = replace(
+        target,
+        status=MemoryStatus.MERGED,
+        redirect_to=source.ref,
+        content="Merged into memory:entity/source.",
+    )
+    assert (await write(cycle)).status is ActionResultStatus.FAILED
+    metadata = (memory.inspect(str(source.ref))).to_json()["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["resolution_chain"] == [
+        str(source.ref),
+        str(target.ref),
+    ]
+
+
+def _execution(action: str, params: JsonObject) -> ActionExecution:
+    name = f"memory.{action}"
+    with builtin_action_catalog_root() as root:
+        spec = ActionCatalogLoader().load(root).get_action(name)
+    return ActionExecution(
+        action=spec,
+        call=ActionCall("call", name, params, 1),
+        framework=ActionFramework(
+            "invoke", "batch", RunScope().push(RunLevel.TURN, "turn"), "memory"
+        ),
+    )
