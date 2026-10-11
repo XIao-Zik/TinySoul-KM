@@ -12,7 +12,7 @@
 | M2 检索 | ✅ 完成 | `feat(km): M2 km.search 混合检索接入内核管道` |
 | M3 聊天导入 | ✅ 完成 | `feat(km): M3 聊天记录导入（JSON/MD/HTML 适配器）` |
 | M4 每日反思 | 🔶 主体完成，连续 3 天验收进行中（Day1 已记录） | `feat(km): M4 每日反思知识卡片` |
-| M5 前端 | ⬜ 未开始 | |
+| M5 前端 | ✅ 完成 | `feat(km): M5 Tauri 知识管理界面` |
 | M6 评估包装 | ⬜ 未开始 | |
 
 ## M0 地基（2026-10-11）
@@ -125,6 +125,28 @@
 - **连续 3 天自动运行**：Day 1（2026-10-12）已真实记录（上表）。Day 2/3 需真实日历日：后续每天启动 `tinysoul start --root my-pkm`（reflection.schedule daily_time=00:15 自动触发）或手动 SDK ReflectionRequest，产出 `cards/2026-10-13.md`、`cards/2026-10-14.md` 后回填本文件。**不伪造运行记录。**
 - 反思轮偶发 `action.internal_failure` 收尾（flash 在 core.answer 里传 km: refs 被 core 解析器拒绝后循环至预算耗尽；core 的 reference_resolvers 硬编码只有 workspace，km 引用无法进入 core.answer 的 references 参数——属上游扩展点限制，已记入待办：flash 质量问题+上游扩展点，不影响卡片生成主链路）。
 - glm-4.5-flash 驱动反思轮的稳定性有限（同一指令时而调用时而忽略 km.generate_card）；换更强模型即改善（等待有余额凭据）。
+
+## M5 Tauri 前端改造（2026-10-12）
+
+完成项：
+
+- [x] 新增 `visualization/src/features/km/KmPage.tsx`（只加不改，现有页面零改动）：四个子视图——
+  - **检索**：输入问题 → 复用既有 Turn 流（`sendUserMessage`，km.search 域）→ 跳转对话页看结果（refs/trace 全保留）；
+  - **卡片流**：按日读取 `knowledge/cards/*.md`，卡片问答体分块渲染；
+  - **图谱**：读 `index.json` 生成节点/边（真实 km_links 引用边），按 km_source 着色的环形布局 SVG，≤120 节点显示标题；
+  - **导入面板**：填 vault 路径 → 调 `tinysoul km-ingest`（dry-run 预览/执行），输出统计。
+- [x] Rust 侧三个命令（`km_cards`/`km_graph`/`km_ingest`，src-tauri/src/lib.rs）：本地只读 + CLI 进程直调（无 shell 注入面）；`cargo check` 通过；`tauri dev` 编译并启动（窗口 "TinySoul"）。
+- [x] 导航：NavRail 新增 Knowledge 入口（LibraryBig 图标），`AppTab` 加 `km` 并持久化恢复。
+- [x] 前端无回归：`pnpm build`（tsc+Vite）通过；vitest 801/801 绿。
+
+实施说明（偏差）：
+
+1. 卡片/图谱/导入走 **Tauri 命令直读本地文件**而非 05 文档设想的"endpoint 新增只读消息"——零协议面改动、零后端改动（05 §4 的 km-graph 消息不再需要）；浏览器版优雅降级为提示文案。
+2. 上游 Playwright e2e（chat-flow）在本机启动失败于**后端种子阶段**（`home:top` ref 解析，发生在前端连接之前，与本次改动无关；上游脚本 Windows 环境问题），已记观察。
+
+使用注意：KM 视图读取的 `knowledge/` 目录以 Settings 里的 projectRoot 为准（演示时设为 `D:/ProgramData/RESUME/my-pkm`）。
+
+遗留：README 截图/录屏素材（M6 录制）；浏览器版不支持卡片/图谱（桌面端专属）。
 
 ## 附录：环境事实
 

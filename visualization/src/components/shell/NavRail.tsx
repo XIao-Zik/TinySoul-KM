@@ -4,6 +4,7 @@ import {
   Brain,
   FolderTree,
   House,
+  LibraryBig,
   MessageSquareText,
   Moon,
   Settings,
@@ -19,6 +20,7 @@ const navItems: { tab: AppTab; label: string; icon: typeof MessageSquareText }[]
   { tab: "workspace", label: "Workspace", icon: FolderTree },
   { tab: "home", label: "Home", icon: House },
   { tab: "memory", label: "Memory", icon: Brain },
+  { tab: "km", label: "Knowledge", icon: LibraryBig },
   { tab: "runtime", label: "Runtime", icon: Activity },
 ];
 

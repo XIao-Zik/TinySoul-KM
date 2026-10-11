@@ -5,5 +5,6 @@ export type AppTab =
   | "workspace"
   | "home"
   | "memory"
+  | "km"
   | "runtime"
   | "settings";

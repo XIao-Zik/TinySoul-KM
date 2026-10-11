@@ -25,6 +25,7 @@ export function normalizePersistedActiveTab(value: unknown): RestorableAppTab {
     case "workspace":
     case "home":
     case "memory":
+    case "km":
       return value;
     case "monitor": // v1 tab name: the runtime observation page replaces it
       return "runtime";

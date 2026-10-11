@@ -15,6 +15,7 @@ import { SettingsDraftChip } from "../../features/settings/SettingsDraftChip";
 import { WorkspacePage } from "../../features/workspace/WorkspacePage";
 import { HomePage } from "../../features/home/HomePage";
 import { MemoryPage } from "../../features/memory/MemoryPage";
+import { KmPage } from "../../features/km/KmPage";
 import { RuntimePage } from "../../features/runtime/RuntimePage";
 
 /**
@@ -57,6 +58,8 @@ export function AppShell() {
               <HomePage />
             ) : activeTab === "memory" ? (
               <MemoryPage />
+            ) : activeTab === "km" ? (
+              <KmPage />
             ) : activeTab === "runtime" ? (
               <RuntimePage />
             ) : activeTab === "settings" ? (
