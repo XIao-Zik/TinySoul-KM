@@ -82,3 +82,8 @@ target = { task_profile = "llm_action" }
 consumer = "km.search.rerank"
 implementation = "llm_task"
 target = { task_profile = "llm_action" }
+
+[[action.models.bindings]]
+consumer = "km.generate_card.generate"
+implementation = "llm_task"
+target = { task_profile = "llm_action" }

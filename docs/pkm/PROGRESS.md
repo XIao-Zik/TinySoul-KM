@@ -11,7 +11,7 @@
 | M1 插件+导入 | ✅ 完成 | `feat(km): M1 knowledge 插件骨架与 Obsidian 增量导入` |
 | M2 检索 | ✅ 完成 | `feat(km): M2 km.search 混合检索接入内核管道` |
 | M3 聊天导入 | ✅ 完成 | `feat(km): M3 聊天记录导入（JSON/MD/HTML 适配器）` |
-| M4 每日反思 | ⬜ 未开始 | |
+| M4 每日反思 | 🔶 主体完成，连续 3 天验收进行中（Day1 已记录） | `feat(km): M4 每日反思知识卡片` |
 | M5 前端 | ⬜ 未开始 | |
 | M6 评估包装 | ⬜ 未开始 | |
 
@@ -103,6 +103,28 @@
 3. `tests/agent/test_sdk.py::test_execution_is_stopped_before_queued_next_day_work_can_archive` 全量跑时偶发失败、单跑通过（上游时序敏感用例，非本改动回归，登记观察）。
 
 遗留：无（与 Session organize 的联动验证并入 M4 反思阶段）。
+
+## M4 每日反思与知识卡片（2026-10-12，Day 1）
+
+完成项：
+
+- [x] `km.generate_card` action（catalog visibility: 仅 `memory_reflection` 情景可见）+ executor：从当日新增文档（`imported_on`）取 ≤12 候选 → LLM 任务（`km.generate_card.generate` 绑 llm_action）→ 结构化卡片 → **source_refs 逐一校验必须是活文档**（伪造 ref → `fabricated_source_ref` 类型化拒绝，绝不落盘）→ 追加写 `cards/YYYY-MM-DD.md`（frontmatter `km_source: card`，`km_links` 带来源标题供反链/图谱）。
+- [x] 索引新增 `imported_on` 字段 + 旧索引 mtime 回填；写入/读取按 `km_source` 分发（notes/chats/cards 各自根目录）。
+- [x] 频控：`knowledge.reflection.daily_card_limit=5`；`enabled=false` 时 executor 无副作用直接 skip（单测覆盖）。
+- [x] 真机验证（Day 1，2026-10-12）：SDK `ReflectionRequest(MEMORY, MANUAL)` 触发 Memory Reflection Turn → 模型调用 km.generate_card → 生成 2 张卡片（真实来源 km:c-5e674ee0f0d3 混合检索设计讨论，confidence=high）→ 卡片文档入库；km.search "RRF 融合" 命中 `km:card-41c9e73cb1c5`（source=card 过滤维度可用）。
+- [x] 单测：executor（有效 ref 写入/伪造拒绝/schema 违规/禁用跳过/空候选跳过）+ write_cards（同日合并、真实 links）+ imported_on 过滤；44 个 km 测试全绿；全量 pytest 绿（基线口径）。
+- [x] 反思轮不写 User Session（内核语义，验证 session 无反思内容）。
+
+关键接线（实施偏差，已登记总纲 §6.2）：
+
+1. **executor 的 LLM runner 必须用 `profile.llm`（ProfileBuildContext），不能用 `context.llm`**——前者绑定反思轮的 ContextEngine，用错会导致执行状态 unknown → turn internal_failure（实测排障 2 小时的根因）。
+2. `imported_on` 必须用本地日期（与反思 timezone 对齐），unchanged 分支要保留该字段。
+
+遗留（M4 验收未完项）：
+
+- **连续 3 天自动运行**：Day 1（2026-10-12）已真实记录（上表）。Day 2/3 需真实日历日：后续每天启动 `tinysoul start --root my-pkm`（reflection.schedule daily_time=00:15 自动触发）或手动 SDK ReflectionRequest，产出 `cards/2026-10-13.md`、`cards/2026-10-14.md` 后回填本文件。**不伪造运行记录。**
+- 反思轮偶发 `action.internal_failure` 收尾（flash 在 core.answer 里传 km: refs 被 core 解析器拒绝后循环至预算耗尽；core 的 reference_resolvers 硬编码只有 workspace，km 引用无法进入 core.answer 的 references 参数——属上游扩展点限制，已记入待办：flash 质量问题+上游扩展点，不影响卡片生成主链路）。
+- glm-4.5-flash 驱动反思轮的稳定性有限（同一指令时而调用时而忽略 km.generate_card）；换更强模型即改善（等待有余额凭据）。
 
 ## 附录：环境事实
 

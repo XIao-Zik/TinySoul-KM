@@ -273,6 +273,7 @@ def index_entry_for(
     source: str,
     mtime: float,
     size: int,
+    imported_on: str = "",
     existing: KnowledgeIndexEntry | None = None,
 ) -> KnowledgeIndexEntry:
     return KnowledgeIndexEntry(
@@ -281,6 +282,7 @@ def index_entry_for(
         checksum=document.checksum,
         source=source,
         title=document.title,
+        imported_on=imported_on,
         mtime=mtime,
         size=size,
         links=document.links,

@@ -1,0 +1,26 @@
+name = "km.generate_card"
+domain = "km"
+
+[tool]
+description = "Generate today's knowledge cards from documents newly added to the knowledge store. Distills 1-5 question/answer cards with concept tags, verified source_refs (km: refs of real documents) and confidence. Cards are appended to the daily card document and become searchable."
+schema = { type = "object", properties = {}, additionalProperties = false }
+
+[semantic]
+use_when = ["The daily reflection turn should digest today's imported knowledge into cards"]
+avoid_when = ["User turns", "No new documents were imported today"]
+effects = ["modifying"]
+
+[visibility]
+default = false
+[visibility.scenarios]
+memory_reflection = true
+
+[runtime]
+timeout_seconds = 600
+parallel_policy = "serial"
+
+[runtime.result]
+trace_mode = "foldable"
+
+[execution]
+executor = "km.generate_card"

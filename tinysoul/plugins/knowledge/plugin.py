@@ -1,7 +1,6 @@
 """Generation and profile assembly of the external knowledge owner plugin."""
 
 from dataclasses import dataclass
-from functools import partial
 
 from tinysoul.infra.concurrency import JoinedOperations
 from tinysoul.infra.model_services import ModelServices
@@ -29,6 +28,7 @@ from tinysoul.kernel.registration import (
 )
 
 from .actions import register_knowledge_actions
+from .actions.card import register_knowledge_card_action
 from .config import KnowledgeSettings, parse_knowledge_settings
 from .engine import KNOWLEDGE_SEARCH_FILTERS, KnowledgeEngine
 from .retrieval import knowledge_search_corpus
@@ -81,6 +81,12 @@ class KnowledgePlugin:
                 ModelImplementation.EMBEDDING_SIMILARITY,
             ),
             "km",
+        ),
+        ModelUseDescriptor(
+            "km.generate_card.generate",
+            "km.generate_card",
+            ModelOperation.GENERATE,
+            (ModelImplementation.LLM_TASK,),
         ),
     )
     provides = (KnowledgeEngine,)
@@ -151,15 +157,31 @@ class KnowledgePlugin:
             kind: ProfileKind, profile: ProfileBuildContext
         ) -> PluginProfileExtension:
             service = KnowledgeReadService(engine, queries=queries())
-            return PluginProfileExtension(
-                "knowledge",
-                services=(Service(KnowledgeReadService, service),),
-                actions=partial(
-                    register_knowledge_actions,
+
+            def register(builder):
+                register_knowledge_actions(
+                    builder,
                     knowledge=service,
                     runtime_bridge=RuntimeKnowledgeBridge(),
                     tasks=profile.tasks,
-                ),
+                )
+                if kind is ProfileKind.MEMORY_REFLECTION:
+                    return register_knowledge_card_action(
+                        builder,
+                        engine=engine,
+                        settings=settings,
+                        knowledge=service,
+                        runtime_bridge=RuntimeKnowledgeBridge(),
+                        tasks=profile.tasks,
+                        llm=profile.llm,
+                        clock=context.clock,
+                    )
+                return builder
+
+            return PluginProfileExtension(
+                "knowledge",
+                services=(Service(KnowledgeReadService, service),),
+                actions=register,
             )
 
         return PluginGeneration(

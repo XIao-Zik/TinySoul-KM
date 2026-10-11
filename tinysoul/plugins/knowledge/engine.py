@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from hashlib import sha256
+import time
+
+import yaml
+
 from pathlib import Path
 from threading import RLock
 
@@ -81,6 +85,32 @@ class KnowledgeEngine:
         self._lock = RLock()
         self._corpus_cache: dict[str, tuple[KnowledgeIndexEntry, str, tuple]] = {}
         self._corpus_cache_version = self._index.version
+        self._backfill_imported_on()
+
+    def _backfill_imported_on(self) -> None:
+        """Entries predating the imported_on field derive it from their mtime."""
+
+        stale = [
+            entry
+            for entry in self._index.all()
+            if not entry.imported_on
+        ]
+        if not stale:
+            return
+        for entry in stale:
+            from dataclasses import replace
+
+            self._index.put(
+                replace(
+                    entry,
+                    imported_on=datetime.fromtimestamp(
+                        entry.mtime or 0
+                    ).date().isoformat()
+                    if entry.mtime
+                    else datetime.now().date().isoformat(),
+                )
+            )
+        self._index.save()
 
     @property
     def root(self) -> Path:
@@ -152,6 +182,7 @@ class KnowledgeEngine:
                             checksum=entry.checksum,
                             source=entry.source,
                             title=entry.title,
+                            imported_on=entry.imported_on,
                             mtime=item.mtime,
                             size=item.size,
                             links=entry.links,
@@ -224,6 +255,7 @@ class KnowledgeEngine:
                     source="obsidian",
                     mtime=item.mtime,
                     size=item.size,
+                    imported_on=datetime.now().date().isoformat(),
                     existing=existing,
                 )
             )
@@ -337,6 +369,7 @@ class KnowledgeEngine:
                     source="chat",
                     mtime=now.timestamp(),
                     size=len(document.text),
+                    imported_on=datetime.now().date().isoformat(),
                 )
             )
             added.append(relative)
@@ -435,6 +468,102 @@ class KnowledgeEngine:
             value = (entry, text, units)
             self._corpus_cache[entry.path] = value
             yield value
+
+    # -- daily reflection support (M4) -------------------------------------
+
+    def documents_imported_on(self, day: str) -> tuple[KnowledgeIndexEntry, ...]:
+        """Live entries first imported on the given YYYY-MM-DD."""
+
+        return tuple(
+            entry for entry in self._index.live() if entry.imported_on == day
+        )
+
+    def document_excerpt(self, entry: KnowledgeIndexEntry, max_chars: int = 1200) -> str:
+        text = self._store.read_document(entry.path, source=entry.source)
+        if len(text) > max_chars:
+            return text[:max_chars] + "…"
+        return text
+
+    def write_cards(
+        self,
+        day: str,
+        cards: tuple[dict[str, object], ...],
+        *,
+        source_titles: dict[str, str] | None = None,
+    ) -> str:
+        """Append validated knowledge cards to ``cards/<day>.md``; returns ref."""
+
+        if not cards:
+            raise KnowledgeContractError("Card write requires at least one card")
+        relative = f"{day}.md"
+        titles = source_titles or {}
+        card_km_id = "card-" + sha256(relative.encode("utf-8")).hexdigest()[:12]
+        sections: list[str] = []
+        for card in cards:
+            refs = tuple(str(ref) for ref in card.get("source_refs", ()))
+            lines = [
+                "## 卡片",
+                "",
+                f"**Q: {card.get('question', '')}**",
+                "",
+                str(card.get("answer", "")),
+                "",
+                f"- 标签: {', '.join(str(t) for t in card.get('concept_tags', ()))}",
+                f"- 来源: {', '.join(refs)}",
+                f"- 置信度: {card.get('confidence', 'medium')}",
+                "",
+            ]
+            sections.append("\n".join(lines))
+        body = "\n".join(sections)
+        links = tuple(
+            dict.fromkeys(
+                title
+                for card in cards
+                for ref in card.get("source_refs", ())
+                for title in (titles.get(str(ref).partition(":")[2], ""),)
+                if title
+            )
+        )
+        existing_path = self.store.cards_root.joinpath(relative)
+        if existing_path.is_file():
+            existing = self._store.read_document(relative, source="card")
+            text = existing.rstrip("\n") + "\n\n" + body
+        else:
+            frontmatter: dict[str, object] = {
+                "km_source": "card",
+                "km_id": card_km_id,
+                "km_card_date": day,
+                "km_imported": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            if links:
+                frontmatter["km_links"] = list(links)
+            text = (
+                "---\n"
+                + yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False)
+                + "---\n\n"
+                + body
+            )
+        self._store.write_card(relative, text)
+        existing_entry = self._index.get(relative)
+        if existing_entry is not None:
+            card_km_id = existing_entry.km_id or card_km_id
+        self._index.put(
+            KnowledgeIndexEntry(
+                path=relative,
+                km_id=card_km_id,
+                checksum=content_checksum(text),
+                source="card",
+                title=f"知识卡片 {day}",
+                imported_on=datetime.now().date().isoformat(),
+                mtime=datetime.now(timezone.utc).timestamp(),
+                size=len(text),
+                links=links,
+                tags=("card",),
+                tombstoned=False,
+            )
+        )
+        self._index.save()
+        return self.ref_for(card_km_id)
 
     def _matches_target(self, entry: KnowledgeIndexEntry, key: str, stem: str) -> bool:
         if entry.path.casefold() == key or entry.path.removesuffix(".md").casefold() == key:

@@ -27,6 +27,7 @@ class KnowledgeIndexEntry:
     checksum: str
     source: str
     title: str = ""
+    imported_on: str = ""
     mtime: float = 0.0
     size: int = 0
     links: tuple[str, ...] = ()
@@ -39,6 +40,7 @@ class KnowledgeIndexEntry:
             "checksum": self.checksum,
             "source": self.source,
             "title": self.title,
+            "imported_on": self.imported_on,
             "mtime": self.mtime,
             "size": self.size,
             "links": list(self.links),
@@ -162,6 +164,7 @@ class KnowledgeIndex:
                 checksum=str(raw.get("checksum", "")),
                 source=str(raw.get("source", "obsidian")),
                 title=str(raw.get("title", "")),
+                imported_on=str(raw.get("imported_on", "")),
                 mtime=float(raw.get("mtime", 0.0)),
                 size=int(raw.get("size", 0)),
                 links=tuple(str(item) for item in raw.get("links", ())),
