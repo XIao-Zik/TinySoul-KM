@@ -9,7 +9,7 @@
 |---|---|---|
 | M0 地基 | ✅ 完成 | `docs(km)` / `chore(km)` |
 | M1 插件+导入 | ✅ 完成 | `feat(km): M1 knowledge 插件骨架与 Obsidian 增量导入` |
-| M2 检索 | ⬜ 未开始 | |
+| M2 检索 | ✅ 完成 | `feat(km): M2 km.search 混合检索接入内核管道` |
 | M3 聊天导入 | ⬜ 未开始 | |
 | M4 每日反思 | ⬜ 未开始 | |
 | M5 前端 | ⬜ 未开始 | |
@@ -59,6 +59,31 @@
 遗留：
 
 - 向量化尚未接入（M2）；`km.search`/cards/chats 未开始（M2/M3/M4）。
+
+## M2 检索接入（2026-10-12）
+
+完成项（对照 03 文档 §6 验收表）：
+
+- [x] `km.search` 在 Agent 对话中可被模型选择并正确返回（带 refs、分页 continuation）：真实对话闭环验证——模型选中 km 域 → 调用 km.search → 返回 625 候选/词法证据/分页令牌 → 答案引用真实 `km:` refs（Note 48/248/448 等）。
+- [x] 反链来自真实 `km_links` 边：单测覆盖（悬空链接不产生反链、无链接文档无反链）。
+- [x] 评测集 `evals/qa_set.jsonl` 60 题（40 fact + 15 synthesis + 5 holdout）+ `evals/run_eval.py` harness；词法基线：**hit@1=0.717 / hit@5=0.917 / hit@10=0.950 / MRR=0.822**。
+- [x] 5k 笔记检索延迟：corpus 候选缓存后 warm **p50=60ms / p95=81ms**（验收 <2s；冷启动一次 2.0s）。
+- [x] 词法路/向量路可观测：结果 payload 带 `stages` / `missing_stages`。
+- [x] 全量 pytest 绿（基线口径）。
+
+架构要点（与设计文档的差异，以代码为准）：
+
+1. **不需要 `SourceKind.knowledge`**（contracts.py 已回退）：来源形状（query/backlinks/directory/refs/result）是跨 owner 的通用词表，knowledge 的"来源"由 `km.search` 的 capability + catalog + corpus 表达。给枚举加值会污染所有既有 action 的模型可见 schema 并破坏 capability 校验（实测）。
+2. **catalog 域名必须叫 `km`**：上游强制 action 名 `<domain>.` 命名空间（`km.search` ∈ domain km），03 文档所写 domain "knowledge" 不合法。
+3. **retrieval_schema 摊平（policy.py 白名单内，重要）**：原 schema 的 `source` 是嵌套 oneOf，glm-4.5-flash 会把嵌套对象序列化成 JSON 字符串导致全部调用失败。摊平为单层对象提示后模型调用 100% 成形；严格语义仍由 `parse_retrieval_request` 独立把关（上游测试全部通过）。
+4. **builder.py 三处接线**：插件注册、`references.bind` 加 `km` 端口、`_validate_selected_models` 加 `km` embedding owner 映射（已登记总纲 §6.2）。
+5. 快照预算：5k 全库查询超默认 4MB 快照，km.search 策略 `snapshot_max_chars=16000000`。
+
+遗留 / 阻塞：
+
+- **向量通道未激活**：bigmodel embedding-3 返回 429"余额不足"（免费 key 只覆盖 glm-4.5-flash），ARK key 无效。管路已就绪（channels 已声明 embedding、EmbeddingIndex 已装配、rerank 已绑 embedding_similarity），换有余额的 embedding key 或本地 onnx 模型即生效。`hit@5 ≥ 词法基线+5pt` 的向量验收顺延至凭据可用。
+- glm-4.5-flash 偶发仍把 source 序列化为字符串（约 1/10 次调用），失败反馈可自愈重试；属免费模型 tool-calling 质量问题。
+- 评测集当前基于合成 vault；真实笔记题目待用户数据接入后滚动补充（人工复核 ≥80% 要求适用于真实题）。
 
 ## 附录：环境事实
 

@@ -216,9 +216,19 @@ class StoreDocument:
     relative_path: str
     km_id: str
     checksum: str
+    title: str
     links: tuple[str, ...]
     tags: tuple[str, ...]
     text: str
+
+
+def note_title(parsed: ParsedNote, relative_path: str) -> str:
+    """Display title: frontmatter ``title`` first, else the file stem."""
+
+    value = parsed.frontmatter.get("title")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return relative_path.removesuffix(".md").rsplit("/", 1)[-1]
 
 
 def compose_note_document(
@@ -270,6 +280,7 @@ def index_entry_for(
         km_id=document.km_id,
         checksum=document.checksum,
         source=source,
+        title=document.title,
         mtime=mtime,
         size=size,
         links=document.links,

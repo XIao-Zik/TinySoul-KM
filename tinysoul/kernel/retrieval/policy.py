@@ -377,79 +377,47 @@ def validate_retrieval_policies(
 
 
 def retrieval_schema(base: JsonObject, policy: RetrievalPolicy) -> JsonObject:
-    """Build one schema for the finite source/step language exposed to Phase2."""
+    """Build the model-facing schema for the finite source/step language.
+
+    The source object is projected flat (one ``kind`` enum, all per-kind
+    fields side by side, no ``oneOf``): weak tool-calling models otherwise
+    serialize the nested object into a JSON string. This schema is only a
+    hint; ``parse_retrieval_request`` remains the authoritative grammar and
+    rejects any request the flat schema would have let through.
+    """
+
+    capability = policy.capability
     scope_schema = (
-        policy.capability.scope_schema() if policy.capability else {"type": "string"}
+        capability.scope_schema() if capability else {"type": "string"}
     )
-    where_schema = (
-        policy.capability.where_schema() if policy.capability else {"type": "object"}
-    )
-    source_variants: list[JsonValue] = []
-    for source in policy.sources:
-        props: JsonObject = {"kind": {"enum": [source.value]}}
-        required = ["kind"]
-        if source is SourceKind.QUERY:
-            props.update(
-                {
-                    "scope": scope_schema,
-                    "query": {
-                        "oneOf": [
-                            {"type": "string", "minLength": 1},
-                            {
-                                "type": "object",
-                                "properties": {
-                                    "document_ref": {"type": "string", "minLength": 1}
-                                },
-                                "required": ["document_ref"],
-                                "additionalProperties": False,
-                            },
-                        ]
-                    },
-                    "where": where_schema,
-                    "literal": {"type": "boolean"},
-                    "regex": {"type": "boolean"},
-                    "case_sensitive": {"type": "boolean"},
-                }
-            )
-            if policy.capability is not None:
-                if not policy.capability.document_query:
-                    props["query"] = {"type": "string", "minLength": 1}
-                if not policy.capability.lexical_syntax:
-                    for key in ("literal", "regex", "case_sensitive"):
-                        props.pop(key)
-            required += ["query"]
-        elif source is SourceKind.BACKLINKS:
-            props.update(
-                {
-                    "scope": scope_schema,
-                    "anchor_ref": {"type": "string", "minLength": 1},
-                    "where": where_schema,
-                }
-            )
-            required += ["anchor_ref"]
-        elif source is SourceKind.DIRECTORY:
-            props.update({"scope": scope_schema, "where": where_schema})
-        elif source is SourceKind.REFS:
-            props["refs"] = {
-                "type": "array",
-                "items": {"type": "string", "minLength": 1},
-                "minItems": 1,
-            }
-            required.append("refs")
-        else:
-            props["result_handle"] = {"type": "string", "minLength": 1}
-            required.append("result_handle")
-        source_variants.append(
-            cast(
-                JsonValue,
-                {
-                    "type": "object",
-                    "properties": props,
-                    "required": required,
-                    "additionalProperties": False,
-                },
-            )
-        )
+    where_schema = capability.where_schema() if capability else {"type": "object"}
+    source_props: JsonObject = {
+        "kind": {"enum": [source.value for source in policy.sources]},
+        "scope": scope_schema,
+        "where": where_schema,
+    }
+    if SourceKind.QUERY in policy.sources:
+        source_props["query"] = {"type": "string", "minLength": 1}
+        if capability is None or capability.lexical_syntax:
+            source_props["literal"] = {"type": "boolean"}
+            source_props["regex"] = {"type": "boolean"}
+            source_props["case_sensitive"] = {"type": "boolean"}
+    if SourceKind.BACKLINKS in policy.sources:
+        source_props["anchor_ref"] = {"type": "string", "minLength": 1}
+    if SourceKind.REFS in policy.sources:
+        source_props["refs"] = {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 1,
+        }
+    if SourceKind.RESULT in policy.sources:
+        source_props["result_handle"] = {"type": "string", "minLength": 1}
+    source: JsonObject = {
+        "type": "object",
+        "properties": source_props,
+        "required": ["kind"],
+        "additionalProperties": False,
+    }
     steps: list[JsonValue] = []
     if OperationKind.FILTER in policy.operations:
         filter_schema = dict(where_schema)
@@ -489,45 +457,33 @@ def retrieval_schema(base: JsonObject, policy: RetrievalPolicy) -> JsonObject:
                     },
                 )
             )
-    request: JsonObject = {
+    page: JsonObject = {
         "type": "object",
         "properties": {
-            "source": {"oneOf": source_variants},
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": policy.page_max_items,
+            },
+            "max_chars": {"type": "integer", "minimum": 1},
+        },
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "source": source,
             "exclude_refs": {"type": "array", "items": {"type": "string"}},
             "steps": {
                 "type": "array",
                 "items": {"oneOf": steps} if steps else {"type": "object"},
                 "maxItems": policy.max_steps if steps else 0,
             },
-            "page": {
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": policy.page_max_items,
-                    },
-                    "max_chars": {"type": "integer", "minimum": 1},
-                },
-                "additionalProperties": False,
-            },
+            "page": page,
+            "continuation": {"type": "string", "minLength": 1},
         },
-        "required": ["source"],
         "additionalProperties": False,
     }
-    return {
-        "type": "object",
-        "oneOf": [
-            request,
-            {
-                "type": "object",
-                "properties": {"continuation": {"type": "string", "minLength": 1}},
-                "required": ["continuation"],
-                "additionalProperties": False,
-            },
-        ],
-    }
-
 
 def _new_table(value: object, *, key: str) -> dict[str, object]:
     if not isinstance(value, Mapping):

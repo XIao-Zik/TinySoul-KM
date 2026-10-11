@@ -26,6 +26,7 @@ class KnowledgeIndexEntry:
     km_id: str
     checksum: str
     source: str
+    title: str = ""
     mtime: float = 0.0
     size: int = 0
     links: tuple[str, ...] = ()
@@ -37,6 +38,7 @@ class KnowledgeIndexEntry:
             "km_id": self.km_id,
             "checksum": self.checksum,
             "source": self.source,
+            "title": self.title,
             "mtime": self.mtime,
             "size": self.size,
             "links": list(self.links),
@@ -55,7 +57,14 @@ class KnowledgeIndex:
         self._path = root / ".tinysoul_knowledge" / "index.json"
         self._lock = RLock()
         self._entries: dict[str, KnowledgeIndexEntry] = {}
+        self._version = 0
         self.load()
+
+    @property
+    def version(self) -> int:
+        """Bumped on every persisted mutation; lets owners invalidate caches."""
+
+        return self._version
 
     @property
     def path(self) -> Path:
@@ -81,6 +90,7 @@ class KnowledgeIndex:
     def put(self, entry: KnowledgeIndexEntry) -> None:
         with self._lock:
             self._entries[entry.path] = entry
+            self._version += 1
 
     def mark_tombstoned(self, path: str) -> KnowledgeIndexEntry | None:
         with self._lock:
@@ -89,6 +99,7 @@ class KnowledgeIndex:
                 return entry
             updated = replace(entry, tombstoned=True)
             self._entries[path] = updated
+            self._version += 1
             return updated
 
     def revive(self, path: str, *, checksum: str, mtime: float, size: int) -> bool:
@@ -115,6 +126,13 @@ class KnowledgeIndex:
             if not matches:
                 return None
             return max(matches, key=lambda item: item.path).km_id
+
+    def get_by_km_id(self, km_id: str) -> KnowledgeIndexEntry | None:
+        with self._lock:
+            for entry in self._entries.values():
+                if entry.km_id == km_id and not entry.tombstoned:
+                    return entry
+            return None
 
     def load(self) -> None:
         if not self._path.exists():
@@ -143,6 +161,7 @@ class KnowledgeIndex:
                 km_id=str(raw.get("km_id", "")),
                 checksum=str(raw.get("checksum", "")),
                 source=str(raw.get("source", "obsidian")),
+                title=str(raw.get("title", "")),
                 mtime=float(raw.get("mtime", 0.0)),
                 size=int(raw.get("size", 0)),
                 links=tuple(str(item) for item in raw.get("links", ())),
@@ -154,6 +173,7 @@ class KnowledgeIndex:
 
     def save(self) -> None:
         with self._lock:
+            self._version += 1
             payload = {
                 "schema": _INDEX_SCHEMA,
                 "entries": {

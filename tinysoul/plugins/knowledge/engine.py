@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
+
+from tinysoul.infra.references import ResourceTarget
+from tinysoul.kernel.retrieval.contracts import (
+    AttributeField,
+    AttributeFilters,
+    AttributeKind,
+)
 
 from .config import KnowledgeSettings
 from .failures import KnowledgeContractError, KnowledgeIOError
@@ -18,11 +25,20 @@ from .ingest.obsidian import (
     content_checksum,
     index_entry_for,
     normalize_text,
+    note_title,
     parse_note,
     walk_vault,
 )
 from .storage.index import KnowledgeIndex, KnowledgeIndexEntry
 from .storage.store import KnowledgeStore
+
+KNOWLEDGE_SEARCH_FILTERS = AttributeFilters(
+    (
+        AttributeField("source"),
+        AttributeField("tag", AttributeKind.TEXT_SET),
+        AttributeField("updated_on", AttributeKind.DATE),
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -50,13 +66,21 @@ class IngestReport:
 class KnowledgeEngine:
     """Single assembly facade for Knowledge reads, writes, and retrieval (M2+)."""
 
-    def __init__(self, *, settings: KnowledgeSettings) -> None:
+    def __init__(
+        self,
+        *,
+        settings: KnowledgeSettings,
+        embedding: object | None = None,
+    ) -> None:
         if not isinstance(settings, KnowledgeSettings):
             raise KnowledgeContractError("Knowledge settings are invalid")
         self._settings = settings
         self._store = KnowledgeStore(settings.root)
         self._index = KnowledgeIndex(settings.root)
+        self.embedding = embedding
         self._lock = RLock()
+        self._corpus_cache: dict[str, tuple[KnowledgeIndexEntry, str, tuple]] = {}
+        self._corpus_cache_version = self._index.version
 
     @property
     def root(self) -> Path:
@@ -127,6 +151,7 @@ class KnowledgeEngine:
                             km_id=entry.km_id,
                             checksum=entry.checksum,
                             source=entry.source,
+                            title=entry.title,
                             mtime=item.mtime,
                             size=item.size,
                             links=entry.links,
@@ -237,6 +262,97 @@ class KnowledgeEngine:
             "tombstoned": sum(1 for entry in entries if entry.tombstoned),
         }
 
+    # -- reference identity (M2 retrieval) ---------------------------------
+
+    @staticmethod
+    def ref_for(km_id: str) -> str:
+        return f"km:{km_id}"
+
+    def canonical_reference(
+        self, resource: str, fragment: str = "", source_day: date | None = None
+    ) -> ResourceTarget:
+        """Resolve one ``km:`` reference to its live store identity.
+
+        Accepts the stable identity form ``km:<km_id>`` and, for convenience,
+        a store-relative or vault-relative Markdown path.
+        """
+
+        _, _, value = resource.partition(":")
+        value = value.strip()
+        if not value:
+            raise KnowledgeContractError(
+                f"Knowledge reference is empty: {resource!r}"
+            )
+        entry = self._find_by_km_id(value) or self._find_by_path(value)
+        if entry is None or entry.tombstoned:
+            raise KnowledgeContractError(
+                f"Knowledge reference does not resolve to a live document: {resource!r}"
+            )
+        return ResourceTarget(self.ref_for(entry.km_id), fragment)
+
+    def resolve_link_target(self, target: str) -> tuple[str, ...]:
+        """Resolve one ``km_links`` target to zero or more live document ids."""
+
+        key = target.strip().casefold()
+        if not key:
+            return ()
+        stem = key.removesuffix(".md").rsplit("/", 1)[-1]
+        matches: list[str] = []
+        for entry in self._index.live():
+            if entry.checksum and self._matches_target(entry, key, stem):
+                matches.append(entry.km_id)
+        return tuple(matches)
+
+    def corpus_candidates(self):
+        """Materialized (entry, text, content_units) per live document.
+
+        Built once per index version and reused across queries so that
+        per-query work stays proportional to the result set, not the store.
+        """
+
+        if self._corpus_cache_version != self._index.version:
+            self._corpus_cache.clear()
+            self._corpus_cache_version = self._index.version
+        for entry in self._index.live():
+            cached = self._corpus_cache.get(entry.path)
+            if cached is not None and cached[0] == entry:
+                yield cached
+                continue
+            from tinysoul.kernel.retrieval.disclosure import content_units
+
+            text = self._store.read_note(entry.path)
+            units = content_units(self.ref_for(entry.km_id), text)
+            value = (entry, text, units)
+            self._corpus_cache[entry.path] = value
+            yield value
+
+    def _matches_target(self, entry: KnowledgeIndexEntry, key: str, stem: str) -> bool:
+        if entry.path.casefold() == key or entry.path.removesuffix(".md").casefold() == key:
+            return True
+        if entry.path.removesuffix(".md").rsplit("/", 1)[-1].casefold() == stem:
+            return True
+        if entry.title and entry.title.casefold() == key:
+            return True
+        return False
+
+    def _find_by_km_id(self, km_id: str) -> KnowledgeIndexEntry | None:
+        for entry in self._index.all():
+            if entry.km_id == km_id:
+                return entry
+        return None
+
+    def _find_by_path(self, value: str) -> KnowledgeIndexEntry | None:
+        candidates = {
+            value,
+            value.removesuffix(".md") + ".md",
+            f"notes/{value}",
+            f"notes/{value.removesuffix('.md')}.md",
+        }
+        for entry in self._index.all():
+            if entry.path in candidates:
+                return entry
+        return None
+
     def _compose_document(
         self,
         item: VaultFile,
@@ -266,6 +382,7 @@ class KnowledgeEngine:
             relative_path=item.relative_path,
             km_id=km_id,
             checksum=checksum,
+            title=note_title(parsed, item.relative_path),
             links=tuple(link.target for link in parsed.links),
             tags=parsed.tags,
             text=text,

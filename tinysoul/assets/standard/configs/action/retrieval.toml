@@ -88,3 +88,24 @@ input_max_chars = 64000
 [action.retrieval."workspace.search".page]
 max_items = 50
 max_chars = 8000
+
+[action.retrieval."km.search"]
+sources = ["query", "backlinks", "directory", "refs", "result"]
+operations = ["filter", "select", "rerank"]
+max_steps = 8
+snapshot_max_chars = 16000000
+
+[action.retrieval."km.search".query]
+channels = ["lexical"]
+
+[action.retrieval."km.search".select]
+allowed_context = ["none", "current"]
+input_max_chars = 64000
+
+[action.retrieval."km.search".rerank]
+allowed_context = ["none", "current"]
+input_max_chars = 64000
+
+[action.retrieval."km.search".page]
+max_items = 50
+max_chars = 8000

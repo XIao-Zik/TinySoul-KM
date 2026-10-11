@@ -1,7 +1,23 @@
-"""Generation assembly of the external knowledge owner plugin."""
+"""Generation and profile assembly of the external knowledge owner plugin."""
 
 from dataclasses import dataclass
+from functools import partial
 
+from tinysoul.infra.concurrency import JoinedOperations
+from tinysoul.infra.model_services import ModelServices
+from tinysoul.infra.model_services.vectors import EmbeddingIndex
+from tinysoul.infra.references import ReferenceResolver
+from tinysoul.kernel.action.config import ActionSettings
+from tinysoul.kernel.action.models import (
+    ModelImplementation,
+    ModelOperation,
+    ModelUseDescriptor,
+    ModelUseRegistry,
+)
+from tinysoul.kernel.retrieval.contracts import OperationKind, SourceKind
+from tinysoul.kernel.retrieval.operations import SearchSession
+from tinysoul.kernel.retrieval.policy import SearchCapability
+from tinysoul.kernel.retrieval.selection import CandidateSelector
 from tinysoul.kernel.registration import (
     GenerationBuildContext,
     PluginConfig,
@@ -12,18 +28,63 @@ from tinysoul.kernel.registration import (
     Service,
 )
 
+from .actions import register_knowledge_actions
 from .config import KnowledgeSettings, parse_knowledge_settings
-from .engine import KnowledgeEngine
+from .engine import KNOWLEDGE_SEARCH_FILTERS, KnowledgeEngine
+from .retrieval import knowledge_search_corpus
 from .runtime_bridge import RuntimeKnowledgeBridge
+from .services import KnowledgeReadService
+
+KM_SEARCH_SOURCES = (
+    SourceKind.QUERY,
+    SourceKind.BACKLINKS,
+    SourceKind.DIRECTORY,
+    SourceKind.REFS,
+    SourceKind.RESULT,
+)
+KM_SEARCH_OPERATIONS = (
+    OperationKind.FILTER,
+    OperationKind.SELECT,
+    OperationKind.RERANK,
+)
 
 
 @dataclass(frozen=True)
 class KnowledgePlugin:
     id = "knowledge"
-    model_uses = ()
-    search_capabilities = ()
+    search_capabilities = (
+        SearchCapability(
+            "km.search",
+            KM_SEARCH_SOURCES,
+            KM_SEARCH_OPERATIONS,
+            scopes=("all", "obsidian", "chat", "card"),
+            filters=KNOWLEDGE_SEARCH_FILTERS,
+            document_query=True,
+        ),
+    )
+    model_uses = (
+        ModelUseDescriptor(
+            "km.search.select",
+            "km.search",
+            ModelOperation.SELECT,
+            (ModelImplementation.LLM_TASK, ModelImplementation.STRUCTURED_DECISION),
+        ),
+        ModelUseDescriptor(
+            "km.search.rerank",
+            "km.search",
+            ModelOperation.RERANK,
+            (
+                *(
+                    ModelImplementation.LLM_TASK,
+                    ModelImplementation.STRUCTURED_DECISION,
+                ),
+                ModelImplementation.EMBEDDING_SIMILARITY,
+            ),
+            "km",
+        ),
+    )
     provides = (KnowledgeEngine,)
-    requires = ()
+    requires = (ModelServices, ReferenceResolver)
     configuration = (
         PluginConfig(
             "knowledge",
@@ -36,12 +97,70 @@ class KnowledgePlugin:
     async def build_generation(
         self, context: GenerationBuildContext
     ) -> PluginGeneration:
-        engine = KnowledgeEngine(settings=context.settings.get(KnowledgeSettings))
+        settings = context.settings.get(KnowledgeSettings)
+        models = context.services.get(ModelServices)
+        references = context.services.get(ReferenceResolver)
+        use = settings.search.embedding_use
+        if use is not None:
+            models.embedding_sessions(use)
+        embedding = (
+            EmbeddingIndex(
+                path=settings.root / ".tinysoul_knowledge" / "embeddings",
+                services=models,
+                use=use,
+                max_chars=settings.search.embedding_cache_max_chars,
+            )
+            if use
+            else None
+        )
+        engine = KnowledgeEngine(settings=settings, embedding=embedding)
+
+        async def invoke(call):
+            return await context.llm.invoke(call)
+
+        selector = CandidateSelector(
+            models=context.settings.get(ModelUseRegistry),
+            invoke=invoke,
+            services=models,
+        )
+
+        async def source(request):
+            operations = JoinedOperations()
+            result = await operations.run(
+                lambda: knowledge_search_corpus(
+                    engine, request, references=references
+                )
+            )
+            operations.check_cancelled()
+            return result
+
+        def queries():
+            return SearchSession(
+                observations=context.observations,
+                action_id="km.search",
+                retrieval_policies=context.settings.get(
+                    ActionSettings
+                ).retrieval_policies,
+                source=source,
+                selector=selector,
+                embedding=embedding,
+                filters=KNOWLEDGE_SEARCH_FILTERS,
+            )
 
         def extend(
             kind: ProfileKind, profile: ProfileBuildContext
-        ) -> PluginProfileExtension | None:
-            return None
+        ) -> PluginProfileExtension:
+            service = KnowledgeReadService(engine, queries=queries())
+            return PluginProfileExtension(
+                "knowledge",
+                services=(Service(KnowledgeReadService, service),),
+                actions=partial(
+                    register_knowledge_actions,
+                    knowledge=service,
+                    runtime_bridge=RuntimeKnowledgeBridge(),
+                    tasks=profile.tasks,
+                ),
+            )
 
         return PluginGeneration(
             self.id,

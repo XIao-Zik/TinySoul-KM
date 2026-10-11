@@ -1,0 +1,60 @@
+{"id": "fact-000", "question": "Note 975 这篇笔记 discusses 的主题是什么？", "answers": ["attention"], "source_refs": ["d25/note-00975.md"], "kind": "fact"}
+{"id": "fact-001", "question": "Note 2617 通过双链引用了 Note 2618 和哪篇其他笔记？", "answers": ["note 2624"], "source_refs": ["d17/note-02617.md"], "kind": "fact"}
+{"id": "fact-002", "question": "Note 4116 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch0"], "source_refs": ["d16/note-04116.md"], "kind": "fact"}
+{"id": "fact-003", "question": "Note 4192 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 4193"], "source_refs": ["d42/note-04192.md"], "kind": "fact"}
+{"id": "fact-004", "question": "Note 840 这篇笔记 discusses 的主题是什么？", "answers": ["transformer"], "source_refs": ["d40/note-00840.md"], "kind": "fact"}
+{"id": "fact-005", "question": "Note 1829 通过双链引用了 Note 1830 和哪篇其他笔记？", "answers": ["note 1836"], "source_refs": ["d29/note-01829.md"], "kind": "fact"}
+{"id": "fact-006", "question": "Note 4559 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch2"], "source_refs": ["d09/note-04559.md"], "kind": "fact"}
+{"id": "fact-007", "question": "Note 3445 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 3446"], "source_refs": ["d45/note-03445.md"], "kind": "fact"}
+{"id": "fact-008", "question": "Note 4690 这篇笔记 discusses 的主题是什么？", "answers": ["agent"], "source_refs": ["d40/note-04690.md"], "kind": "fact"}
+{"id": "fact-009", "question": "Note 4487 通过双链引用了 Note 4488 和哪篇其他笔记？", "answers": ["note 4494"], "source_refs": ["d37/note-04487.md"], "kind": "fact"}
+{"id": "fact-010", "question": "Note 4021 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch3"], "source_refs": ["d21/note-04021.md"], "kind": "fact"}
+{"id": "fact-011", "question": "Note 4804 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 4805"], "source_refs": ["d04/note-04804.md"], "kind": "fact"}
+{"id": "fact-012", "question": "Note 3613 这篇笔记 discusses 的主题是什么？", "answers": ["embedding"], "source_refs": ["d13/note-03613.md"], "kind": "fact"}
+{"id": "fact-013", "question": "Note 1965 通过双链引用了 Note 1966 和哪篇其他笔记？", "answers": ["note 1972"], "source_refs": ["d15/note-01965.md"], "kind": "fact"}
+{"id": "fact-014", "question": "Note 20 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch6"], "source_refs": ["d20/note-00020.md"], "kind": "fact"}
+{"id": "fact-015", "question": "Note 661 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 662"], "source_refs": ["d11/note-00661.md"], "kind": "fact"}
+{"id": "fact-016", "question": "Note 907 这篇笔记 discusses 的主题是什么？", "answers": ["memory"], "source_refs": ["d07/note-00907.md"], "kind": "fact"}
+{"id": "fact-017", "question": "Note 2353 通过双链引用了 Note 2354 和哪篇其他笔记？", "answers": ["note 2360"], "source_refs": ["d03/note-02353.md"], "kind": "fact"}
+{"id": "fact-018", "question": "Note 803 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch5"], "source_refs": ["d03/note-00803.md"], "kind": "fact"}
+{"id": "fact-019", "question": "Note 3683 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 3684"], "source_refs": ["d33/note-03683.md"], "kind": "fact"}
+{"id": "fact-020", "question": "Note 94 这篇笔记 discusses 的主题是什么？", "answers": ["kv-cache"], "source_refs": ["d44/note-00094.md"], "kind": "fact"}
+{"id": "fact-021", "question": "Note 4016 通过双链引用了 Note 4017 和哪篇其他笔记？", "answers": ["note 4023"], "source_refs": ["d16/note-04016.md"], "kind": "fact"}
+{"id": "fact-022", "question": "Note 2574 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch5"], "source_refs": ["d24/note-02574.md"], "kind": "fact"}
+{"id": "fact-023", "question": "Note 1722 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 1723"], "source_refs": ["d22/note-01722.md"], "kind": "fact"}
+{"id": "fact-024", "question": "Note 3254 这篇笔记 discusses 的主题是什么？", "answers": ["kv-cache"], "source_refs": ["d04/note-03254.md"], "kind": "fact"}
+{"id": "fact-025", "question": "Note 2060 通过双链引用了 Note 2061 和哪篇其他笔记？", "answers": ["note 2067"], "source_refs": ["d10/note-02060.md"], "kind": "fact"}
+{"id": "fact-026", "question": "Note 2848 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch6"], "source_refs": ["d48/note-02848.md"], "kind": "fact"}
+{"id": "fact-027", "question": "Note 2921 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 2922"], "source_refs": ["d21/note-02921.md"], "kind": "fact"}
+{"id": "fact-028", "question": "Note 3083 这篇笔记 discusses 的主题是什么？", "answers": ["memory"], "source_refs": ["d33/note-03083.md"], "kind": "fact"}
+{"id": "fact-029", "question": "Note 4207 通过双链引用了 Note 4208 和哪篇其他笔记？", "answers": ["note 4214"], "source_refs": ["d07/note-04207.md"], "kind": "fact"}
+{"id": "fact-030", "question": "Note 625 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch2"], "source_refs": ["d25/note-00625.md"], "kind": "fact"}
+{"id": "fact-031", "question": "Note 2788 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 2789"], "source_refs": ["d38/note-02788.md"], "kind": "fact"}
+{"id": "fact-032", "question": "Note 734 这篇笔记 discusses 的主题是什么？", "answers": ["kv-cache"], "source_refs": ["d34/note-00734.md"], "kind": "fact"}
+{"id": "fact-033", "question": "Note 4566 通过双链引用了 Note 4567 和哪篇其他笔记？", "answers": ["note 4573"], "source_refs": ["d16/note-04566.md"], "kind": "fact"}
+{"id": "fact-034", "question": "Note 4407 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch4"], "source_refs": ["d07/note-04407.md"], "kind": "fact"}
+{"id": "fact-035", "question": "Note 2393 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 2394"], "source_refs": ["d43/note-02393.md"], "kind": "fact"}
+{"id": "fact-036", "question": "Note 2356 这篇笔记 discusses 的主题是什么？", "answers": ["retrieval"], "source_refs": ["d06/note-02356.md"], "kind": "fact"}
+{"id": "fact-037", "question": "Note 3747 通过双链引用了 Note 3748 和哪篇其他笔记？", "answers": ["note 3754"], "source_refs": ["d47/note-03747.md"], "kind": "fact"}
+{"id": "fact-038", "question": "Note 1154 的 frontmatter 里 batch 标签的编号是多少？", "answers": ["batch6"], "source_refs": ["d04/note-01154.md"], "kind": "fact"}
+{"id": "fact-039", "question": "Note 4730 的正文里 Related 后面引用的第一篇笔记是？", "answers": ["note 4731"], "source_refs": ["d30/note-04730.md"], "kind": "fact"}
+{"id": "syn-000", "question": "Note 2531 Related 引用的笔记 Note 2532 discusses 什么主题？", "answers": ["retrieval"], "source_refs": ["d32/note-02532.md"], "kind": "synthesis"}
+{"id": "syn-001", "question": "Note 202 Related 引用的笔记 Note 203 discusses 什么主题？", "answers": ["memory"], "source_refs": ["d03/note-00203.md"], "kind": "synthesis"}
+{"id": "syn-002", "question": "Note 3021 Related 引用的笔记 Note 3022 discusses 什么主题？", "answers": ["kv-cache"], "source_refs": ["d22/note-03022.md"], "kind": "synthesis"}
+{"id": "syn-003", "question": "Note 2978 Related 引用的笔记 Note 2979 discusses 什么主题？", "answers": ["memory"], "source_refs": ["d29/note-02979.md"], "kind": "synthesis"}
+{"id": "syn-004", "question": "Note 3777 Related 引用的笔记 Note 3778 discusses 什么主题？", "answers": ["agent"], "source_refs": ["d28/note-03778.md"], "kind": "synthesis"}
+{"id": "syn-005", "question": "Note 3458 Related 引用的笔记 Note 3459 discusses 什么主题？", "answers": ["memory"], "source_refs": ["d09/note-03459.md"], "kind": "synthesis"}
+{"id": "syn-006", "question": "Note 742 Related 引用的笔记 Note 743 discusses 什么主题？", "answers": ["attention"], "source_refs": ["d43/note-00743.md"], "kind": "synthesis"}
+{"id": "syn-007", "question": "Note 3266 Related 引用的笔记 Note 3267 discusses 什么主题？", "answers": ["memory"], "source_refs": ["d17/note-03267.md"], "kind": "synthesis"}
+{"id": "syn-008", "question": "Note 4798 Related 引用的笔记 Note 4799 discusses 什么主题？", "answers": ["attention"], "source_refs": ["d49/note-04799.md"], "kind": "synthesis"}
+{"id": "syn-009", "question": "Note 4542 Related 引用的笔记 Note 4543 discusses 什么主题？", "answers": ["attention"], "source_refs": ["d43/note-04543.md"], "kind": "synthesis"}
+{"id": "syn-010", "question": "Note 4083 Related 引用的笔记 Note 4084 discusses 什么主题？", "answers": ["retrieval"], "source_refs": ["d34/note-04084.md"], "kind": "synthesis"}
+{"id": "syn-011", "question": "Note 953 Related 引用的笔记 Note 954 discusses 什么主题？", "answers": ["agent"], "source_refs": ["d04/note-00954.md"], "kind": "synthesis"}
+{"id": "syn-012", "question": "Note 3485 Related 引用的笔记 Note 3486 discusses 什么主题？", "answers": ["kv-cache"], "source_refs": ["d36/note-03486.md"], "kind": "synthesis"}
+{"id": "syn-013", "question": "Note 4148 Related 引用的笔记 Note 4149 discusses 什么主题？", "answers": ["embedding"], "source_refs": ["d49/note-04149.md"], "kind": "synthesis"}
+{"id": "syn-014", "question": "Note 4022 Related 引用的笔记 Note 4023 discusses 什么主题？", "answers": ["attention"], "source_refs": ["d23/note-04023.md"], "kind": "synthesis"}
+{"id": "hold-000", "question": "Note 4900 这篇笔记 discusses 的主题是什么？", "answers": ["retrieval"], "source_refs": ["d00/note-04900.md"], "kind": "holdout"}
+{"id": "hold-001", "question": "Note 4901 这篇笔记 discusses 的主题是什么？", "answers": ["embedding"], "source_refs": ["d01/note-04901.md"], "kind": "holdout"}
+{"id": "hold-002", "question": "Note 4902 这篇笔记 discusses 的主题是什么？", "answers": ["kv-cache"], "source_refs": ["d02/note-04902.md"], "kind": "holdout"}
+{"id": "hold-003", "question": "Note 4903 这篇笔记 discusses 的主题是什么？", "answers": ["attention"], "source_refs": ["d03/note-04903.md"], "kind": "holdout"}
+{"id": "hold-004", "question": "Note 4904 这篇笔记 discusses 的主题是什么？", "answers": ["transformer"], "source_refs": ["d04/note-04904.md"], "kind": "holdout"}

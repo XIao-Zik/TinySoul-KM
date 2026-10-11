@@ -117,6 +117,7 @@ from ..lifecycle.sources import GenerationSources
 from tinysoul.plugins.home.plugin import HomePlugin
 from tinysoul.plugins.home.services import HomeService
 from tinysoul.plugins.knowledge.plugin import KnowledgePlugin
+from tinysoul.plugins.knowledge.engine import KnowledgeEngine
 from tinysoul.plugins.session.plugin import SessionPlugin
 from tinysoul.plugins.memory.plugin import MemoryPlugin
 from tinysoul.plugins.memory.actions import MemoryWriteSession
@@ -597,6 +598,7 @@ class AgentBuilder:
                     "home": home.canonical_reference,
                     "memory": memory.canonical_reference,
                     "workspace": workspace.canonical_reference,
+                    "km": services.get(KnowledgeEngine).canonical_reference,
                 }
             )
             jobs = services.get(JobRegistry)
@@ -892,6 +894,7 @@ class AgentBuilder:
         self, plan: AgentConfigPlan, actions: frozenset[str]
     ) -> None:
         from tinysoul.plugins.home.config import AgentHomeSettings
+        from tinysoul.plugins.knowledge.config import KnowledgeSettings
         from tinysoul.plugins.memory.config import MemorySettings
 
         embedding_uses = {}
@@ -900,6 +903,9 @@ class AgentBuilder:
                 embedding_uses["home"] = setting.value.search.embedding_use
             elif isinstance(setting.value, MemorySettings):
                 embedding_uses["memory"] = setting.value.search.embedding_use
+            elif isinstance(setting.value, KnowledgeSettings):
+                # km.search resolves its embedding owner as "km".
+                embedding_uses["km"] = setting.value.search.embedding_use
         plan.model_uses.validate_selected(
             actions=actions,
             retrieval_policies=plan.action.retrieval_policies,

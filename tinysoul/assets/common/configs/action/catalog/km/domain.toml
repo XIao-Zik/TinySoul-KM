@@ -1,0 +1,10 @@
+name = "km"
+description = "External knowledge base: imported notes, chat exports, and knowledge cards."
+selection_hint = "Use to search and inspect personal knowledge documents (km:* refs)."
+
+[visibility]
+default = true
+
+[runtime]
+timeout_seconds = 60
+parallel_policy = "serial"

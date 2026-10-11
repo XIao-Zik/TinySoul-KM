@@ -1,0 +1,21 @@
+name = "km.search"
+domain = "km"
+
+[tool]
+description = "Search the personal knowledge store (imported notes, chat exports, knowledge cards). Pass source as a JSON OBJECT, never a string. Example: {\"source\": {\"kind\": \"query\", \"scope\": \"all\", \"query\": \"transformer architecture\"}}. kind is one of query, backlinks, directory, refs, result. Optional steps add filter/select/rerank; optional page bounds the result. Results include km: refs and real content previews."
+schema = { type = "object", properties = { source = { type = "object" }, steps = { type = "array" }, exclude_refs = { type = "array", items = { type = "string" } }, page = { type = "object" } }, required = ["source"], additionalProperties = false }
+
+[semantic]
+use_when = ["Personal knowledge evidence or imported note refs should be discovered"]
+avoid_when = ["Changing resource content", "Searching Agent Memory instead of external notes"]
+effects = ["read_only"]
+
+[runtime]
+timeout_seconds = 600
+parallel_policy = "allowed"
+
+[runtime.result]
+trace_mode = "foldable"
+
+[execution]
+executor = "km.search"

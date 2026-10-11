@@ -72,3 +72,13 @@ target = { task_profile = "llm_action" }
 consumer = "workspace.search.rerank"
 implementation = "llm_task"
 target = { task_profile = "llm_action" }
+
+[[action.models.bindings]]
+consumer = "km.search.select"
+implementation = "llm_task"
+target = { task_profile = "llm_action" }
+
+[[action.models.bindings]]
+consumer = "km.search.rerank"
+implementation = "llm_task"
+target = { task_profile = "llm_action" }
