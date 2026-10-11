@@ -1,0 +1,9 @@
+[knowledge]
+root = "knowledge"
+
+[knowledge.search]
+embedding_cache_max_chars = 16000000
+
+[knowledge.reflection]
+enabled = false
+daily_card_limit = 5

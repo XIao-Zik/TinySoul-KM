@@ -7,8 +7,8 @@
 
 | 里程碑 | 状态 | 提交 |
 |---|---|---|
-| M0 地基 | ✅ 完成 | 见下文 M0 记录 |
-| M1 插件+导入 | ⬜ 未开始 | |
+| M0 地基 | ✅ 完成 | `docs(km)` / `chore(km)` |
+| M1 插件+导入 | ✅ 完成 | `feat(km): M1 knowledge 插件骨架与 Obsidian 增量导入` |
 | M2 检索 | ⬜ 未开始 | |
 | M3 聊天导入 | ⬜ 未开始 | |
 | M4 每日反思 | ⬜ 未开始 | |
@@ -35,6 +35,30 @@
 4. pytest 基线唯一失败：`tests/plugins/capabilities/expand/test_engine.py::test_real_sdk_streamable_http_discovery_and_call`（真实 HTTP 探测返回 `unavailable`，期望 `available`）——上游自带测试、依赖本机外网/服务可用性，与本次改动无关，登记为基线已知失败。此后的"全量 pytest 绿"按"除该用例外全绿"口径执行。
 
 遗留：无。
+
+## M1 knowledge 插件 + Obsidian 导入（2026-10-11）
+
+完成项（对照 02 文档 §5 验收表）：
+
+- [x] 插件 `tinysoul/plugins/knowledge/`：plugin/config/engine/failures/runtime_bridge/storage(store+index)/ingest(obsidian)；`KnowledgePlugin` 注册进 `_standard_plugins()`（builder.py 白名单行）。
+- [x] `tinysoul km-ingest --root <proj> --obsidian <vault> [--dry-run] [--full]`（cli.py 白名单改动；Windows 控制台输出已做 errors=replace 兜底）。
+- [x] 性能：5k 笔记全量导入 **19.3s**（验收 <5min）；重复导入 **0.5s**（验收 <10s，mtime+size 预筛 + checksum 二级判）。
+- [x] 增量四分支单测：新增/修改（km_id 按路径稳定）/删除（tombstone，store 文件保留，tombstones.jsonl 审计）/重命名（checksum 归并 km_id）；已删除笔记恢复可复活。
+- [x] km_links/km_tags 抽检 20 篇（5k 基准 vault）：40/40 = **100%**（验收 ≥95%）。
+- [x] `--dry-run` 输出与实际执行一致（单测断言三个列表相等，且 dry-run 不落盘）。
+- [x] 解析器单测含畸形 frontmatter 降级、围栏内标签跳过、标题行不误判、CRLF/BOM 归一。
+- [x] 全量 pytest 绿（基线口径：仅剩 M0 登记的 expand 环境依赖失败）。
+- [x] 装配验证：my-pkm（含新插件）`tinysoul start --once` 对话正常。
+
+偏差（登记进 00-master-plan §6.2 白名单）：
+
+1. **`SourceKind` 实际位于 `kernel/retrieval/contracts.py`**（非总纲所写 policy.py），M2 改动点以代码为准。
+2. **新增白名单第 5 处：`tinysoul/infra/config/catalog/context.toml`**。上游有"每个打包项目 TOML 叶子必须在 config catalog 登记"的契约测试；新增资产 `assets/common/configs/knowledge.toml` 后必须补 `knowledge.*` 字段描述（纯数据，7 个 field + 4 个 field_group + 1 个 surface）。initializer.py 本身无需改动（资产遍历是数据驱动的）。
+3. 验收用基准 vault 为程序生成的 5k 笔记（真实个人 vault 待用户侧数据）。
+
+遗留：
+
+- 向量化尚未接入（M2）；`km.search`/cards/chats 未开始（M2/M3/M4）。
 
 ## 附录：环境事实
 

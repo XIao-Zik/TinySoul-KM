@@ -43,8 +43,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _reset(args[1:])
     if args and args[0] == "start":
         return _start(args[1:])
+    if args and args[0] == "km-ingest":
+        return _km_ingest(args[1:])
     parser = argparse.ArgumentParser(prog="tinysoul")
-    parser.add_argument("command", choices=("start", "init", "reset"))
+    parser.add_argument("command", choices=("start", "init", "reset", "km-ingest"))
     try:
         parser.parse_args(args)
     except SystemExit as exc:
@@ -127,6 +129,78 @@ def _reset(argv: Sequence[str]) -> int:
         f"(config profile: {outcome.config_profile.value}; {env_status})"
     )
     return 0
+
+
+def _km_ingest(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="tinysoul km-ingest",
+        description=(
+            "Import external knowledge sources (Obsidian vault, chat exports) "
+            "into a TinySoul-KM project's knowledge store."
+        ),
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path.cwd(),
+        help="project root containing tinysoul.toml (default: current directory)",
+    )
+    parser.add_argument(
+        "--obsidian",
+        type=Path,
+        help="Obsidian vault directory to import (Markdown files)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the changes that would happen without writing anything",
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="ignore mtime/size prefiltering and re-hash every source file",
+    )
+    args = parser.parse_args(tuple(argv))
+    # Windows consoles may reject non-ASCII paths on the default code page.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, OSError):
+            pass
+    if args.obsidian is None:
+        print(
+            "tinysoul: km-ingest requires --obsidian (chat sources arrive in M3)",
+            file=sys.stderr,
+        )
+        return 2
+    root = args.root.expanduser().resolve()
+    vault = args.obsidian.expanduser().resolve()
+    try:
+        from tinysoul.plugins.knowledge.config import parse_knowledge_settings
+        from tinysoul.plugins.knowledge.engine import KnowledgeEngine
+
+        config = ConfigEnvironment.from_project_root(root)
+        settings = config.parse_section(
+            "knowledge", lambda tree: parse_knowledge_settings(tree, project_root=root)
+        )
+        engine = KnowledgeEngine(settings=settings)
+        report = engine.ingest_obsidian(vault, dry_run=args.dry_run, full=args.full)
+    except GatewayError as exc:
+        print(f"tinysoul: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"tinysoul: {exc}", file=sys.stderr)
+        return 1
+    print(report.summary())
+    for path in report.added:
+        print(f"  + {path}")
+    for path in report.updated:
+        print(f"  ~ {path}")
+    for path in report.tombstoned:
+        print(f"  - {path}")
+    for path, reason in report.failures:
+        print(f"  ! {path}: {reason}")
+    return 1 if report.failures else 0
 
 
 def _start(argv: Sequence[str]) -> int:

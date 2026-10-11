@@ -89,8 +89,9 @@ DeepSeek 计划（2026-10 会话）提供了正确的**产品主线**（导入�
 1. **提交纪律**：每个里程碑至少一次结构化提交（`feat(km): ...`），简历项目的 commit 历史本身就是展示物。
 2. **改动白名单**（允许触碰的既有文件，全部有明确理由）：
    - `tinysoul/agent/composition/builder.py` — `_standard_plugins()` 加一行注册；
-   - `tinysoul/kernel/retrieval/policy.py` — `SourceKind` 加 `knowledge`；
+   - `tinysoul/kernel/retrieval/contracts.py` — `SourceKind` 加 `knowledge`（M1 实施时确认枚举在此文件而非原计划的 policy.py）；
    - `tinysoul/gateway/cli.py` — 加 `km-ingest` 子命令；
+   - `tinysoul/infra/config/catalog/context.toml` — 新增 `knowledge.*` 配置描述条目（上游契约：打包 TOML 叶子必须有 catalog 覆盖，否则 `test_config_catalog` 失败）；
    - 其余一律走新增文件或项目侧配置。白名单变更需先在本文件登记。
 3. **改动黑名单**（不触碰）：`kernel` 其余部分、`agent` 装配核心、Session 格式、endpoint 协议既有消息、`prompts/`（身份/人格走项目 Home 内容，不走 prompts）。
 4. **上游同步**：上游更新时 `git switch main && git merge upstream/main`，跑 `pytest`，再 `git switch pkm && git merge main`。冲突预期集中在白名单四处。

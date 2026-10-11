@@ -520,3 +520,89 @@ group = "memory.search"
 title = "Memory Embedding Use"
 description = "Logical embedding use shared by Memory discovery and similarity ranking."
 value_kind = "string"
+
+[[surface]]
+id = "knowledge"
+title = "Knowledge"
+description = "External knowledge store: imported notes, chat exports, and knowledge cards."
+
+[[field_group]]
+id = "knowledge.storage"
+surface = "knowledge"
+title = "Storage"
+description = "Defines the project-relative knowledge store root."
+
+[[field_group]]
+id = "knowledge.inspection"
+surface = "knowledge"
+title = "Inspection"
+description = "Controls bounded progressive knowledge document inspection."
+
+[[field_group]]
+id = "knowledge.search"
+surface = "knowledge"
+title = "Semantic Search"
+description = "Controls the rebuildable embedding cache and hybrid fusion used by Knowledge search."
+
+[[field_group]]
+id = "knowledge.reflection"
+surface = "knowledge"
+title = "Daily Reflection"
+description = "Controls automatic daily knowledge card generation."
+
+[[field]]
+path = "knowledge.root"
+surface = "knowledge"
+group = "knowledge.storage"
+title = "Knowledge Root"
+description = "Project-relative directory containing imported knowledge Markdown and derived indexes."
+value_kind = "string"
+importance = "advanced"
+
+[[field]]
+path = "knowledge.inspect.page_max_chars"
+surface = "knowledge"
+group = "knowledge.inspection"
+title = "Knowledge Page Length"
+description = "Maximum characters returned per page when inspecting knowledge documents."
+value_kind = "integer"
+
+[[field]]
+path = "knowledge.search.embedding_cache_max_chars"
+surface = "knowledge"
+group = "knowledge.search"
+title = "Knowledge Embedding Cache"
+description = "Maximum characters retained in the rebuildable Knowledge vector cache."
+value_kind = "integer"
+
+[[field]]
+path = "knowledge.search.embedding_use"
+surface = "knowledge"
+group = "knowledge.search"
+title = "Knowledge Embedding Use"
+description = "Logical embedding use shared by Knowledge discovery and similarity ranking."
+value_kind = "string"
+
+[[field]]
+path = "knowledge.search.vector_weight"
+surface = "knowledge"
+group = "knowledge.search"
+title = "Vector Fusion Weight"
+description = "Weight of the vector channel when fusing lexical and vector retrieval scores."
+value_kind = "number"
+
+[[field]]
+path = "knowledge.reflection.enabled"
+surface = "knowledge"
+group = "knowledge.reflection"
+title = "Enable Daily Cards"
+description = "Whether the daily Reflection Turn generates knowledge cards."
+value_kind = "boolean"
+
+[[field]]
+path = "knowledge.reflection.daily_card_limit"
+surface = "knowledge"
+group = "knowledge.reflection"
+title = "Daily Card Limit"
+description = "Maximum knowledge cards generated per day."
+value_kind = "integer"

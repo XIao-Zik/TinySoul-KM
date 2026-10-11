@@ -116,6 +116,7 @@ from ..lifecycle.sources import GenerationSources
 
 from tinysoul.plugins.home.plugin import HomePlugin
 from tinysoul.plugins.home.services import HomeService
+from tinysoul.plugins.knowledge.plugin import KnowledgePlugin
 from tinysoul.plugins.session.plugin import SessionPlugin
 from tinysoul.plugins.memory.plugin import MemoryPlugin
 from tinysoul.plugins.memory.actions import MemoryWriteSession
@@ -988,6 +989,7 @@ def _standard_plugins() -> tuple[AgentPlugin, ...]:
         WebPlugin(),
         ResourcePlugin(),
         ReflectionSchedulePlugin(),
+        KnowledgePlugin(),
     )
 
 
