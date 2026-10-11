@@ -92,6 +92,7 @@ DeepSeek 计划（2026-10 会话）提供了正确的**产品主线**（导入�
    - `tinysoul/gateway/cli.py` — 加 `km-ingest` 子命令；
    - `tinysoul/infra/config/catalog/context.toml` — 新增 `knowledge.*` 配置描述条目（上游契约：打包 TOML 叶子必须有 catalog 覆盖，否则 `test_config_catalog` 失败）；
    - `tinysoul/kernel/retrieval/policy.py` — `retrieval_schema()` 模型可见 schema 摊平（去掉嵌套 oneOf；`parse_retrieval_request` 仍是权威语法，上游测试全过）。动机：弱模型（glm-4.5-flash）会把嵌套 oneOf 的 source 对象序列化成 JSON 字符串，检索调用全部失败。
+   - `README.md` — M6 按 06 文档 §3 重写为简历门面（上游原文在 `upstream-baseline` tag 与 git 历史）。
    - 其余一律走新增文件或项目侧配置。白名单变更需先在本文件登记。
 3. **改动黑名单**（不触碰）：`kernel` 其余部分、`agent` 装配核心、Session 格式、endpoint 协议既有消息、`prompts/`（身份/人格走项目 Home 内容，不走 prompts）。
 4. **上游同步**：上游更新时 `git switch main && git merge upstream/main`，跑 `pytest`，再 `git switch pkm && git merge main`。冲突预期集中在白名单四处。

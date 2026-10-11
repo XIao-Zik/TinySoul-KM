@@ -1,117 +1,68 @@
-# TinySoul
+# TinySoul-KM
 
-TinySoul is a local, provider-neutral LLM agent runtime built around explicit Context, Action, Session, Workspace, Agent Home, Memory, and daily lifecycle boundaries.
+基于 [TinySoul-Agent](https://github.com/your-org/TinySoul-Agent) 运行时的**本地个人知识管理 Agent**：把 Obsidian/Markdown 笔记库和聊天记录导出收进统一知识库，自然语言混合检索（词法 + 向量、带真实来源引用），每日自动整理并生成带强制来源引用的知识卡片，Tauri 桌面端提供检索 / 卡片流 / 知识图谱 / 导入面板。
 
-Python 3.13 or newer is required.
+```
+Obsidian vault ──┐            ┌─ cards/（每日知识卡片）
+聊天记录导出 ────┤            │
+                 ▼            ▼
+        knowledge 插件（唯一存储 owner：notes/ chats/ cards/ + checksum 增量索引 + tombstone）
+                 │
+   km.search（复用内核检索管道：query/backlinks/directory + filter/select/rerank + 分页）
+                 │
+   Memory Reflection Turn（每日反思 → km.generate_card → 伪造引用被类型化拒绝）
+                 │
+   Tauri 2 + React 19 桌面端（Knowledge 页：检索 / 卡片流 / 图谱 / 导入）
+```
 
-## Standard
+## 为什么值得看
 
-Install TinySoul and create a backend project:
+- **在约束严格的 Agent 运行时里按 owner/插件协议扩展**：全部源码改动只触碰 4 个白名单位置（插件注册行、检索 schema 摊平、CLI 子命令、config catalog 条目），其余均为新增文件——对上游持续可合并。为什么不用 ChromaDB：`docs/pkm/01-architecture-and-decisions.md` §2 的六条论证。
+- **复用而非自造**：检索走内核 `kernel/retrieval` 管道（来源→约束→引用快照→分页令牌），卡片复用 Reflection Turn 内核，向量复用 `EmbeddingIndex`——没有第二个向量库。
+- **可量化的验收**：5k 笔记全量导入 19.3s / 重复导入 0.5s / 删除可追溯（tombstone）；检索 hit@5 = 0.917、MRR = 0.822（60 题，词法基线）；warm p95 = 81ms。完整数字与消融见 [evals/report.md](evals/report.md)。
+- **诚实工程**：卡片 `source_refs` 逐一校验、伪造引用被类型化拒绝；免费模型的 tool-calling 缺陷（嵌套 schema 字符串化）定位并修复；已知限制全部写进报告。
+
+## 快速开始（≤ 6 条命令）
 
 ```powershell
+# 0) 前置：Python 3.13+、Node 20+、pnpm、Rust 1.97+（桌面端）
 python -m pip install .
-tinysoul init my-agent
+tinysoul init my-pkm                      # 1) 初始化项目（标准 profile）
+# 2) 配置凭据：编辑 my-pkm/.env（GLM_API_KEY 等）与 configs/llm/providers.toml
+tinysoul km-ingest --root my-pkm --obsidian "D:\Obsidian\MyVault" --dry-run   # 3) 预览导入
+tinysoul km-ingest --root my-pkm --obsidian "D:\Obsidian\MyVault"             # 4) 增量导入
+tinysoul start --root my-pkm              # 5) 启动后端（每日 00:15 自动反思出卡片）
+# 6) 桌面端：cd visualization && pnpm install && pnpm tauri dev
+#    Knowledge 页 → 设置 projectRoot 为 my-pkm → 检索 / 卡片流 / 图谱 / 导入
 ```
 
-The standard profile starts with every LLM provider disabled, so the backend and frontend can run before credentials are configured:
+聊天记录导入：`tinysoul km-ingest --root my-pkm --chat <导出文件> --platform deepseek`（JSON / Markdown / HTML）。
 
-```powershell
-tinysoul start --root my-agent --mode normal
-```
+## 评测
 
-Use the frontend settings to add a credential and enable its provider, or edit `my-agent/.env` and `my-agent/configs/llm/providers.toml`. Enabling a provider without any non-empty declared credential is invalid and startup or configuration activation will fail with a configuration error.
+| 指标 | 数值 |
+|---|---|
+| 检索 hit@1 / hit@5 / hit@10 | 0.717 / **0.917** / 0.950 |
+| MRR | 0.822 |
+| 5k 笔记全量导入 / 重复导入 | 19.3 s / **0.5 s** |
+| 检索延迟（5k，warm p95） | 81 ms |
+| 卡片来源引用抽检 | 100% 指向真实文档（伪造即类型化拒绝） |
 
-For one non-interactive turn:
+方法、分题型数字、失败案例与配置消融：[evals/report.md](evals/report.md)；评测集与 harness：[evals/](evals/)。
 
-```powershell
-tinysoul start --root my-agent --once "Summarize today's work"
-```
+## 与上游的关系
 
-## SDK
+基于 TinySoul-Agent（MIT）——一个以 Context / Action / Session / Workspace / Agent Home / Memory / 日生命周期为边界的本地 provider-neutral Agent 运行时。上游能力全部保留；本项目的改动面：
 
-The same project can be embedded through the asynchronous SDK:
+| 位置 | 改动 |
+|---|---|
+| `tinysoul/agent/composition/builder.py` | 插件注册行 + `references.bind` km 端口 + embedding owner 映射（3 处） |
+| `tinysoul/kernel/retrieval/policy.py` | 检索 action 的模型可见 schema 摊平（弱模型 tool-calling 兼容；`parse_retrieval_request` 仍是权威语法） |
+| `tinysoul/gateway/cli.py` | `km-ingest` 子命令 |
+| `tinysoul/infra/config/catalog/context.toml` | `knowledge.*` 配置描述条目（上游 catalog 覆盖契约） |
 
-```python
-import asyncio
-from tinysoul.agent import Agent, UserTurnRequest
+其余全部是新增文件（`tinysoul/plugins/knowledge/`、`tinysoul/assets` 的 km 目录、`tests/km/`、`evals/`、`visualization/src/features/km/`）。设计文档：[docs/pkm/](docs/pkm/)（总纲、架构决策、导入、检索、反思卡片、前端、评测、二期路线）。上游原 README 的安装 / SDK / 开发说明继续有效，见 git 历史（`upstream-baseline` tag）。
 
-async def main():
-    agent = await Agent.create("my-agent")
-    try:
-        await agent.start()
-        handle = await agent.submit_turn(UserTurnRequest("Summarize today's work"))
-        result = await handle.wait()
-        print(result.status)
-    finally:
-        await agent.shutdown()
+## 二期路线（已设计，未实施）
 
-asyncio.run(main())
-```
-
-SDK creation does not open a terminal or HTTP listener. Question replies, Cycle grants, cancellation and observations use the same Turn identity; see [Agent design](docs/design/agent.md). Configuration PATCH saves a candidate; call reload explicitly to activate it when idle.
-
-Session presents a topic map with source references and chronological interaction text. The Agent can organize earlier conversation through `core.session.organize` during a User Turn; SDK Session access remains read-only. Facts stay immutable, annotations share their day archive, and a new day starts with an empty map. See [Session design](docs/design/session.md).
-
-The architecture refactor is complete within its agreed scope. See the [main plan](docs/analysis/done/20260915-done-agent-architecture-refactor-plan.md) and [R7 implementation and acceptance record](docs/analysis/done/20260921-done-Agent重构第七轮子计划-会话整理与架构收口.md#13-实施结果与最终核对).
-
-R7 keeps the R6 Turn/manifest format and adds optional `runtime/session/map.json`; a missing map means no annotations. Existing projects must explicitly add the new `core/actions/session_organize.toml` catalog document from an initialized project's `configs/action/catalog` before using this version. Do not use `reset` to update a project with data.
-
-Use `agent.services.get(WorkspaceService)` to obtain a scoped owner service and await its I/O methods. Reacquire services after reload/restart or a CalendarDay switch; writes are not retried automatically. A `ReflectionRequest` authorizes one independent Home or dated Memory Reflection Turn on the same Agent.
-
-Projects use `configs/agent.toml`, `configs/reflection.toml`, and `configs/execution.toml`. Domain/action TOML files live under `configs/action/catalog`; scenario visibility is editable, while service permissions are enforced by assembly. The R3 changes also update Workspace and Session formats and the [Endpoint protocol](docs/endpoint/index.md). Existing projects require explicit migration into a separately initialized project; `reset` is not a data migration tool. See the [R3 implementation record](docs/analysis/done/20260917-done-Agent重构第三轮子计划-领域语义与能力组织.md#133-格式变化与部署边界).
-
-## Development
-
-The development profile enables the repository maintainer's providers and capability settings, including Kimi search, but contains no credentials. Its enabled providers must have their declared credentials before the backend starts.
-
-### Backend
-
-Install TinySoul and create a development project:
-
-```powershell
-python -m pip install -e ".[dev]"
-tinysoul init my-agent-dev --config-profile development
-```
-
-Add the required credentials to `my-agent-dev/.env`, then start the backend:
-
-```powershell
-tinysoul start --root my-agent-dev --mode normal
-```
-
-To rebuild the development project from the packaged Home and configuration templates:
-
-```powershell
-tinysoul reset my-agent-dev
-```
-
-Run `reset` from outside the target directory. It preserves `.env` and replaces everything else, including runtime data, conversations, Memory, archives, and `.git`.
-
-### Frontend
-
-Keep the backend running, then start the desktop frontend in another terminal. The frontend requires Node.js 20+, pnpm, and Rust 1.97+.
-
-```powershell
-cd visualization
-pnpm install
-pnpm tauri dev
-```
-
-The frontend discovers the running TinySoul project automatically and does not manage the backend process.
-
-### Checks
-
-```powershell
-.\scripts\test.ps1
-.\scripts\test.ps1 -TestPath tests/kernel/action/execution
-.\scripts\test.ps1 -Suite Full
-.\scripts\test.ps1 -Suite Generation
-$env:TINYSOUL_PYTHON=(Get-Command python).Source
-.\scripts\typecheck.ps1
-```
-
-`test.ps1` runs the Fast local business-logic suite by default and creates a unique isolated run root under `.local-test/runs/`. Use `-TestPath` for focused feedback, `-Suite Generation` for the small set of package-owned project/resource generation contracts, and `-Suite Full` for the completion gate, which includes both local suites plus wheel build and isolated-install checks. Real-provider and opt-in network tests are excluded from Fast and Full and can only be selected with `-Suite External` plus their existing environment switches. If PowerShell blocks local script execution, invoke the same script with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test.ps1`. `typecheck.ps1` runs `ty` with the selected Python environment.
-
-If repository-local file operations are disrupted by the host environment, use `-ArtifactRoot <scratch-directory>` to place isolated runs elsewhere. Relative paths resolve against the repository. The script creates and cleans only its own `runs/<uuid>` directory; failed runs retain their artifacts. The selected suite and its assertions remain the same.
-
-Architecture and module contracts are under `docs/design/`; the desktop frontend is documented in `visualization/README.md`.
+文献接入（Zotero/MCP）· 无人值守 SDK 自动化 · 联网降级检索（知识库严格优先）与知识勘误审计 · 深度整理 Job · 研究项目 Workspace · 网页剪藏——见 [docs/pkm/07-capability-activation.md](docs/pkm/07-capability-activation.md)。
