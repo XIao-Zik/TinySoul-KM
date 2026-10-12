@@ -309,6 +309,23 @@ fn km_graph(project_root: String, limit: Option<usize>) -> Result<KmGraph, Strin
         .collect();
     kept.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     kept.truncate(max);
+    // Cards and chat entries are the interesting recent nodes; keep them even
+    // when their degree is too low for the top-N cut.
+    let kept_ids: std::collections::HashSet<String> =
+        kept.iter().map(|(_, _, e)| e.km_id.clone()).collect();
+    let specials: Vec<(usize, String, &KmIndexEntry)> = index
+        .entries
+        .iter()
+        .filter(|(path, e)| {
+            let is_special_source =
+                e.source == "card" || path.to_lowercase().starts_with("chats/");
+            is_special_source && !e.tombstoned && !e.km_id.is_empty()
+                && !kept_ids.contains(&e.km_id)
+        })
+        .map(|(path, e)| (0, path.clone(), e))
+        .take(64)
+        .collect();
+    kept.extend(specials);
     let known: std::collections::HashSet<String> =
         kept.iter().map(|(_, _, e)| e.km_id.clone()).collect();
     let mut nodes: Vec<KmNode> = kept
