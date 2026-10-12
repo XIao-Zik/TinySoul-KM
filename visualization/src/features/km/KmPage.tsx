@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BookOpen,
   GitBranch,
@@ -13,10 +13,11 @@ import { useConnectionStore } from "../../store/connectionStore";
 import { sendUserMessage } from "../chat/turnController";
 
 /**
- * Knowledge (km) views: search hand-off, card feed, link graph, and the
- * import panel. Cards/graph read the local knowledge store through Tauri
- * commands (desktop shell only); search reuses the existing Turn flow so the
- * conversation, trace and refs stay in one place.
+ * Knowledge (km) views: search hand-off, card feed, link graph (one-hop
+ * neighborhood explorer + whole-store overview), and the import panel.
+ * Cards/graph read the local knowledge store through Tauri commands (desktop
+ * shell only); search reuses the existing Turn flow so the conversation,
+ * trace and refs stay in one place.
  */
 
 type KmView = "search" | "cards" | "graph" | "ingest";
@@ -39,6 +40,26 @@ interface KmGraphData {
   nodes: KmNode[];
   edges: { from: string; to: string }[];
   truncated: boolean;
+}
+
+interface KmDocHit {
+  id: string;
+  title: string;
+  path: string;
+  source: string;
+}
+
+interface KmNeighbor {
+  id: string;
+  title: string;
+  path: string;
+  source: string;
+  direction: "out" | "in" | "both";
+}
+
+interface KmNeighborhoodData {
+  center: KmDocHit;
+  neighbors: KmNeighbor[];
 }
 
 const SOURCE_COLORS: Record<string, string> = {
@@ -194,6 +215,342 @@ function KmCardsView() {
 }
 
 function KmGraphView() {
+  const [mode, setMode] = useState<"local" | "overview">("local");
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex items-center gap-3 border-b border-line px-4 py-2 text-[12px]">
+        <div className="flex gap-1">
+          {(
+            [
+              ["local", "邻域浏览"],
+              ["overview", "全图概览"],
+            ] as const
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setMode(key)}
+              className={`rounded-lg px-2.5 py-1 transition-colors ${
+                mode === key ? "bg-active text-accent" : "text-fg-dim hover:text-fg"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        <span className="text-fg-dim">
+          {mode === "local"
+            ? "从一篇文档出发，看它的真实引用边；点邻居继续走。"
+            : "连接度最高的文档子图。"}
+        </span>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        {mode === "local" ? <KmNeighborhoodExplorer /> : <KmOverviewGraph />}
+      </div>
+    </div>
+  );
+}
+
+const DIRECTION_BADGE: Record<KmNeighbor["direction"], string> = {
+  out: "出链 →",
+  in: "← 入链",
+  both: "↔ 双向",
+};
+
+/** One-hop explorer: pick a document, see (and walk) its real link edges. */
+function KmNeighborhoodExplorer() {
+  const root = useProjectRoot();
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<KmDocHit[] | null>(null);
+  const [center, setCenter] = useState<KmNeighborhoodData | null>(null);
+  const [stack, setStack] = useState<KmDocHit[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const openDoc = useCallback(
+    (doc: KmDocHit, pushCurrent: boolean) => {
+      setBusy(true);
+      setError(null);
+      setHits(null);
+      setQuery("");
+      invoke<KmNeighborhoodData>("km_neighborhood", {
+        projectRoot: root,
+        kmId: doc.id,
+      })
+        .then((data) => {
+          setCenter(data);
+          if (pushCurrent) {
+            setStack((prev) => [...prev, doc].slice(-12));
+          }
+        })
+        .catch((e: string) => setError(String(e)))
+        .finally(() => setBusy(false));
+    },
+    [root],
+  );
+
+  // Default view: the most recently imported document (cards/chats surface
+  // first in practice, which is exactly the interesting neighborhood).
+  const rootRef = useRef(root);
+  useEffect(() => {
+    invoke<KmDocHit[]>("km_find_docs", {
+      projectRoot: rootRef.current,
+      query: "",
+      limit: 1,
+    })
+      .then((found) => {
+        if (found.length > 0) openDoc(found[0], false);
+      })
+      .catch((e: string) => setError(String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Search-as-you-type (debounced).
+  useEffect(() => {
+    const value = query.trim();
+    if (!value) {
+      setHits(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      invoke<KmDocHit[]>("km_find_docs", {
+        projectRoot: root,
+        query: value,
+        limit: 8,
+      })
+        .then(setHits)
+        .catch(() => setHits([]));
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [query, root]);
+
+  const back = useCallback(() => {
+    setStack((prev) => {
+      const previous = prev[prev.length - 1];
+      if (previous) openDoc(previous, false);
+      return prev.slice(0, -1);
+    });
+  }, [openDoc]);
+
+  if (error)
+    return (
+      <KmNotice
+        text={error}
+        onRetry={() => center && openDoc(center.center, false)}
+      />
+    );
+  if (!center) return <KmLoading />;
+
+  return (
+    <div className="flex flex-col gap-3 p-4">
+      <div className="relative flex items-center gap-2">
+        {stack.length > 0 && (
+          <button
+            onClick={back}
+            className="rounded-lg border border-line px-2.5 py-1.5 text-[12px] text-fg-dim hover:text-fg"
+          >
+            ← 返回
+          </button>
+        )}
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="输入标题或路径关键词，选一篇文档作为中心…"
+          className="flex-1 rounded-lg border border-line bg-bg-elev px-3 py-2 text-[13px] outline-none focus:border-accent"
+        />
+        {busy && <Loader2 size={14} className="animate-spin text-fg-dim" />}
+        {hits !== null && hits.length > 0 && (
+          <div className="absolute top-full left-10 z-10 mt-1 max-w-xl overflow-hidden rounded-lg border border-line bg-bg-elev shadow-lg">
+            {hits.map((hit) => (
+              <button
+                key={hit.id}
+                onClick={() => openDoc(hit, true)}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-active"
+              >
+                <span
+                  className="inline-block h-2 w-2 shrink-0 rounded-full"
+                  style={{ background: SOURCE_COLORS[hit.source] ?? "#94a3b8" }}
+                />
+                <span className="truncate">{hit.title}</span>
+                <span className="ml-auto shrink-0 text-[11px] text-fg-dim">
+                  {hit.source}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+        {hits !== null && hits.length === 0 && (
+          <div className="absolute top-full left-10 z-10 mt-1 rounded-lg border border-line bg-bg-elev px-3 py-2 text-[12px] text-fg-dim shadow-lg">
+            没有匹配的文档
+          </div>
+        )}
+      </div>
+
+      {stack.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1 text-[11px] text-fg-dim">
+          {stack.map((doc, index) => (
+            <span
+              key={`${doc.id}-${index}`}
+              className="rounded bg-bg-elev px-1.5 py-0.5"
+            >
+              {doc.title.slice(0, 14)}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <KmNeighborhoodCanvas
+        data={center}
+        onSelect={(id) => {
+          const hit = center.neighbors.find((n) => n.id === id);
+          if (hit)
+            openDoc(
+              { id: hit.id, title: hit.title, path: hit.path, source: hit.source },
+              true,
+            );
+        }}
+      />
+    </div>
+  );
+}
+
+function KmNeighborhoodCanvas({
+  data,
+  onSelect,
+}: {
+  data: KmNeighborhoodData;
+  onSelect: (id: string) => void;
+}) {
+  const size = 760;
+  const cx = size / 2;
+  const cy = 300;
+  const radius = 210;
+  const positions = new Map<string, { x: number; y: number }>();
+  data.neighbors.forEach((neighbor, index) => {
+    const angle =
+      (2 * Math.PI * index) / Math.max(data.neighbors.length, 1) - Math.PI / 2;
+    positions.set(neighbor.id, {
+      x: cx + radius * Math.cos(angle),
+      y: cy + radius * Math.sin(angle),
+    });
+  });
+  if (data.neighbors.length === 0) {
+    return (
+      <div className="p-10 text-center text-[13px] text-fg-dim">
+        「{data.center.title}
+        」没有引用边——它没有出链，也没有任何文档引用它（孤立文档）。
+      </div>
+    );
+  }
+  return (
+    <svg width={size} height={560} className="max-w-full">
+      <defs>
+        <marker
+          id="km-arrow"
+          viewBox="0 0 10 10"
+          refX="9"
+          refY="5"
+          markerWidth="6"
+          markerHeight="6"
+          orient="auto-start-reverse"
+        >
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#8886" />
+        </marker>
+      </defs>
+      {data.neighbors.map((neighbor) => {
+        const position = positions.get(neighbor.id);
+        if (!position) return null;
+        const outward = neighbor.direction !== "in";
+        const inward = neighbor.direction !== "out";
+        return (
+          <g key={neighbor.id}>
+            {outward && (
+              <line
+                x1={cx}
+                y1={cy}
+                x2={position.x}
+                y2={position.y}
+                stroke="#8888"
+                strokeWidth={1.2}
+                markerEnd="url(#km-arrow)"
+              />
+            )}
+            {inward && (
+              <line
+                x1={position.x}
+                y1={position.y}
+                x2={cx}
+                y2={cy}
+                stroke="#8884"
+                strokeWidth={1}
+                strokeDasharray="4 3"
+                markerEnd="url(#km-arrow)"
+              />
+            )}
+          </g>
+        );
+      })}
+      {data.neighbors.map((neighbor) => {
+        const position = positions.get(neighbor.id);
+        if (!position) return null;
+        return (
+          <g
+            key={neighbor.id}
+            className="cursor-pointer"
+            onClick={() => onSelect(neighbor.id)}
+          >
+            <circle
+              cx={position.x}
+              cy={position.y}
+              r={8}
+              fill={SOURCE_COLORS[neighbor.source] ?? "#94a3b8"}
+            />
+            <text
+              x={position.x}
+              y={position.y + 22}
+              fontSize={11}
+              textAnchor="middle"
+              className="fill-fg"
+            >
+              {neighbor.title.slice(0, 18)}
+            </text>
+            <text
+              x={position.x}
+              y={position.y + 35}
+              fontSize={9}
+              textAnchor="middle"
+              className="fill-fg-dim"
+            >
+              {DIRECTION_BADGE[neighbor.direction]}
+            </text>
+          </g>
+        );
+      })}
+      <circle cx={cx} cy={cy} r={16} fill="#7c6cf6" />
+      <text
+        x={cx}
+        y={cy + 34}
+        fontSize={12}
+        textAnchor="middle"
+        className="fill-fg"
+        fontWeight="600"
+      >
+        {data.center.title.slice(0, 24)}
+      </text>
+      <text
+        x={cx}
+        y={cy + 48}
+        fontSize={10}
+        textAnchor="middle"
+        className="fill-fg-dim"
+      >
+        {data.center.source} · 点击邻居节点继续走
+      </text>
+    </svg>
+  );
+}
+
+/** Whole-store overview: highest-degree subgraph on a circle. */
+function KmOverviewGraph() {
   const root = useProjectRoot();
   const loader = useCallback(
     () => invoke<KmGraphData>("km_graph", { projectRoot: root, limit: 100 }),
@@ -203,11 +560,11 @@ function KmGraphView() {
   if (error) return <KmNotice text={error} onRetry={reload} />;
   if (loading || data === null) return <KmLoading />;
   return (
-    <div className="flex flex-col gap-3 p-6">
+    <div className="flex flex-col gap-3 p-4">
       <div className="flex items-center gap-4 text-[12px] text-fg-dim">
         <span>
-          {data.nodes.length} 节点（按连接度取前 {data.nodes.length}）· {data.edges.length} 条真实引用边
-          {data.truncated && "· 已从全库截断"}
+          {data.nodes.length} 节点 · {data.edges.length} 条真实引用边
+          {data.truncated && " · 已从全库按连接度截断"}
         </span>
         {Object.entries(SOURCE_COLORS).map(([source, color]) => (
           <span key={source} className="flex items-center gap-1">
@@ -314,9 +671,7 @@ function KmIngestView() {
       dryRun,
     })
       .then((outcome) =>
-        setOutput(
-          `exit=${outcome.code}\n${outcome.output || "(no output)"}`,
-        ),
+        setOutput(`exit=${outcome.code}\n${outcome.output || "(no output)"}`),
       )
       .catch((e: string) => setOutput(`error: ${e}`))
       .finally(() => setBusy(false));
@@ -326,13 +681,13 @@ function KmIngestView() {
     <div className="mx-auto flex max-w-2xl flex-col gap-4 p-8">
       <h2 className="text-lg font-semibold">导入 Obsidian vault</h2>
       <p className="text-[13px] text-fg-dim">
-        调用 <code>tinysoul km-ingest</code>：增量导入（checksum 对比、删除记
-        tombstone）。先用 dry-run 预览变更。
+        调用 <code>tinysoul km-ingest</code>
+        ：增量导入（checksum 对比、删除记 tombstone）。先用 dry-run 预览变更。
       </p>
       <input
         value={vault}
         onChange={(e) => setVault(e.target.value)}
-        placeholder="vault 目录的绝对路径，例如 D:\\Obsidian\\MyVault"
+        placeholder="vault 目录的绝对路径，例如 D:\Obsidian\MyVault"
         className="rounded-lg border border-line bg-bg-elev px-3 py-2 text-[14px] outline-none focus:border-accent"
       />
       <label className="flex items-center gap-2 text-[13px]">

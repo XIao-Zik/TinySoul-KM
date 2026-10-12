@@ -182,6 +182,239 @@ pub struct KmGraph {
     pub truncated: bool,
 }
 
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct KmDocHit {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+    pub source: String,
+}
+
+fn km_live_entries(project_root: &str) -> Result<Vec<(String, KmIndexEntry)>, String> {
+    let index_path = km_root(project_root)?
+        .join(".tinysoul_knowledge")
+        .join("index.json");
+    let text = fs::read_to_string(&index_path)
+        .map_err(|e| format!("Cannot read knowledge index: {e}"))?;
+    let index: KmIndex =
+        serde_json::from_str(&text).map_err(|e| format!("Knowledge index is invalid: {e}"))?;
+    Ok(index
+        .entries
+        .into_iter()
+        .filter(|(_, e)| !e.tombstoned && !e.km_id.is_empty())
+        .collect())
+}
+
+fn km_doc_hit(path: &str, entry: &KmIndexEntry) -> KmDocHit {
+    let stem = Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+        .to_string();
+    KmDocHit {
+        id: entry.km_id.clone(),
+        title: if entry.title.is_empty() { stem } else { entry.title.clone() },
+        path: path.to_string(),
+        source: entry.source.clone(),
+    }
+}
+
+/// Candidate documents for the neighborhood explorer: title prefix, then
+/// title/path substring; an empty query returns the most recently imported.
+#[tauri::command]
+fn km_find_docs(
+    project_root: String,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<KmDocHit>, String> {
+    let entries = km_live_entries(&project_root)?;
+    let q = query.trim().to_lowercase();
+    let mut hits: Vec<(i64, KmDocHit)> = Vec::new();
+    for (path, entry) in &entries {
+        let hit = km_doc_hit(path, entry);
+        let score = if q.is_empty() {
+            -(entry.mtime as i64)
+        } else {
+            let title = hit.title.to_lowercase();
+            let stem = Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path)
+                .to_lowercase();
+            if title.starts_with(&q) {
+                0
+            } else if title.contains(&q) {
+                1
+            } else if stem.contains(&q) || path.to_lowercase().contains(&q) {
+                2
+            } else {
+                continue;
+            }
+        };
+        hits.push((score, hit));
+    }
+    hits.sort_by(|a, b| {
+        a.0.cmp(&b.0).then_with(|| {
+            a.1.title.to_lowercase().cmp(&b.1.title.to_lowercase())
+        })
+    });
+    hits.truncate(limit.unwrap_or(20).min(50));
+    Ok(hits.into_iter().map(|(_, hit)| hit).collect())
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct KmNeighbor {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+    pub source: String,
+    /// Relative to the center document: "out", "in", or "both".
+    pub direction: String,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct KmNeighborhood {
+    pub center: KmDocHit,
+    pub neighbors: Vec<KmNeighbor>,
+}
+
+/// One-hop link neighborhood of one document: resolved out-links plus real
+/// in-links (backlinks) inverted from the whole index.
+#[derive(Clone, Copy, PartialEq)]
+enum Dir {
+    Out,
+    In,
+    Both,
+}
+
+fn record_neighbor<'a>(
+    neighbors: &mut std::collections::HashMap<String, (Dir, String, &'a KmIndexEntry)>,
+    id: String,
+    dir: Dir,
+    path: &str,
+    entry: &'a KmIndexEntry,
+) {
+    match neighbors.get_mut(&id) {
+        Some((existing, _, _)) => {
+            if *existing != dir {
+                *existing = Dir::Both;
+            }
+        }
+        None => {
+            neighbors.insert(id, (dir, path.to_string(), entry));
+        }
+    }
+}
+
+#[tauri::command]
+fn km_neighborhood(
+    project_root: String,
+    km_id: String,
+) -> Result<KmNeighborhood, String> {
+    let entries = km_live_entries(&project_root)?;
+    let center = entries
+        .iter()
+        .find(|(_, e)| e.km_id == km_id)
+        .ok_or_else(|| format!("Knowledge document not found: {km_id}"))?;
+
+    let mut by_stem: std::collections::HashMap<String, String> = Default::default();
+    let mut by_title: std::collections::HashMap<String, String> = Default::default();
+    for (path, entry) in &entries {
+        let stem = Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(path)
+            .to_lowercase();
+        by_stem.insert(stem, entry.km_id.clone());
+        if !entry.title.is_empty() {
+            by_title.insert(entry.title.to_lowercase(), entry.km_id.clone());
+        }
+    }
+    let resolve = |link: &String| -> Option<String> {
+        let key = Path::new(link)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(link.as_str())
+            .to_lowercase();
+        by_stem.get(&key).or_else(|| by_title.get(&key)).cloned()
+    };
+
+    let mut neighbors: std::collections::HashMap<String, (Dir, String, &KmIndexEntry)> =
+        Default::default();
+
+    // Out-links of the center.
+    for link in &center.1.links {
+        if let Some(target) = resolve(link) {
+            if target != km_id {
+                    {
+        // Out-links of the center.
+        for link in &center.1.links {
+            if let Some(target) = resolve(link) {
+                if target != km_id {
+                    record_neighbor(&mut neighbors, target, Dir::Out, &center.0, &center.1);
+                }
+            }
+        }
+    }
+            }
+        }
+    }
+    // In-links: every document whose links resolve to the center.
+    for (path, entry) in &entries {
+        if entry.km_id == km_id {
+            continue;
+        }
+        for link in &entry.links {
+            if resolve(link).as_deref() == Some(km_id.as_str()) {
+                record_neighbor(&mut neighbors, entry.km_id.clone(), Dir::In, path, entry);
+                break;
+            }
+        }
+        let _ = path;
+    }
+
+    let mut rows: Vec<(String, Dir, String, &KmIndexEntry)> = neighbors
+        .into_iter()
+        .map(|(id, (dir, path, entry))| (id, dir, path, entry))
+        .collect();
+    rows.sort_by(|a, b| {
+        let title = |e: &KmIndexEntry, fallback: &String| -> String {
+            if e.title.is_empty() {
+                fallback.clone()
+            } else {
+                e.title.clone()
+            }
+        };
+        title(a.3, &a.2).to_lowercase().cmp(&title(b.3, &b.2).to_lowercase())
+    });
+    rows.truncate(48);
+    let neighbors = rows
+        .into_iter()
+        .map(|(id, dir, path, entry)| {
+            let direction = match dir {
+                Dir::Out => "out",
+                Dir::In => "in",
+                Dir::Both => "both",
+            };
+            KmNeighbor {
+                id,
+                title: if entry.title.is_empty() {
+                    path.strip_suffix(".md").unwrap_or(&path).to_string()
+                } else {
+                    entry.title.clone()
+                },
+                path,
+                source: entry.source.clone(),
+                direction: direction.to_string(),
+            }
+        })
+        .collect();
+    Ok(KmNeighborhood {
+        center: km_doc_hit(&center.0, &center.1),
+        neighbors,
+    })
+}
+
 fn km_root(project_root: &str) -> Result<PathBuf, String> {
     let root = Path::new(project_root).join("knowledge");
     if !root.is_dir() {
@@ -232,6 +465,8 @@ struct KmIndexEntry {
     tags: Vec<String>,
     #[serde(default)]
     tombstoned: bool,
+    #[serde(default)]
+    mtime: f64,
 }
 
 #[derive(Deserialize, Debug)]
@@ -409,6 +644,8 @@ pub fn run() {
             write_export_files,
             km_cards,
             km_graph,
+            km_find_docs,
+            km_neighborhood,
             km_ingest
         ])
         .run(tauri::generate_context!())
