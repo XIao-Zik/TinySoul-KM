@@ -158,9 +158,10 @@ function useKmData<T>(loader: () => Promise<T>) {
 }
 
 function KmCardsView() {
+  const root = useProjectRoot();
   const loader = useCallback(
-    () => invoke<KmCard[]>("km_cards", { projectRoot: useProjectRootValue() }),
-    [],
+    () => invoke<KmCard[]>("km_cards", { projectRoot: root }),
+    [root],
   );
   const { data, error, loading, reload } = useKmData<KmCard[]>(loader);
   if (error) return <KmNotice text={error} onRetry={reload} />;
@@ -193,9 +194,10 @@ function KmCardsView() {
 }
 
 function KmGraphView() {
+  const root = useProjectRoot();
   const loader = useCallback(
-    () => invoke<KmGraphData>("km_graph", { projectRoot: useProjectRootValue(), limit: 300 }),
-    [],
+    () => invoke<KmGraphData>("km_graph", { projectRoot: root, limit: 300 }),
+    [root],
   );
   const { data, error, loading, reload } = useKmData<KmGraphData>(loader);
   if (error) return <KmNotice text={error} onRetry={reload} />;
@@ -379,9 +381,4 @@ function KmLoading() {
       读取知识库…
     </div>
   );
-}
-
-/** The Tauri command expects the project root path used to init the project. */
-function useProjectRootValue(): string {
-  return useAppStore((s) => s.projectRoot) || "";
 }
