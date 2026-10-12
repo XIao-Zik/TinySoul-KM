@@ -31,6 +31,20 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    // With dragDropEnabled=false the webview receives OS file drops; a drop
+    // outside the workspace sidebar must not navigate the app to the file.
+    const guard = (event: DragEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener("dragover", guard);
+    window.addEventListener("drop", guard);
+    return () => {
+      window.removeEventListener("dragover", guard);
+      window.removeEventListener("drop", guard);
+    };
+  }, []);
+
   return (
     <MotionConfig reducedMotion={uiPrefs.reducedMotion ? "always" : "user"}>
       <AppShell />
