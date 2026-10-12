@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BookOpen,
+  FilePlus2,
+  FolderOpen,
+  FolderPlus,
   GitBranch,
+  RefreshCw,
   Search,
   Upload,
   Loader2,
@@ -20,7 +24,14 @@ import { sendUserMessage } from "../chat/turnController";
  * trace and refs stay in one place.
  */
 
-type KmView = "search" | "cards" | "graph" | "ingest";
+type KmView = "search" | "cards" | "graph" | "files" | "ingest";
+
+interface KmFsEntry {
+  name: string;
+  rel: string;
+  is_dir: boolean;
+  size: number;
+}
 
 interface KmCardSource {
   id: string;
@@ -92,6 +103,7 @@ export function KmPage() {
   const views: { key: KmView; label: string; icon: typeof Search }[] = [
     { key: "search", label: "检索", icon: Search },
     { key: "cards", label: "卡片流", icon: BookOpen },
+    { key: "files", label: "文件", icon: FolderOpen },
     { key: "graph", label: "图谱", icon: GitBranch },
     { key: "ingest", label: "导入", icon: Upload },
   ];
@@ -114,6 +126,7 @@ export function KmPage() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         {view === "search" && <KmSearchView />}
         {view === "cards" && <KmCardsView onOpenDoc={setViewing} />}
+        {view === "files" && <KmFilesView />}
         {view === "graph" && <KmGraphView />}
         {view === "ingest" && <KmIngestView />}
       </div>
@@ -780,6 +793,262 @@ function KmGraphCanvas({
           );
         })}
       </svg>
+    </div>
+  );
+}
+
+function KmFilesView() {
+  const vault = useAppStore((s) => s.kmVaultRoot);
+  const root = useProjectRoot();
+  const [rel, setRel] = useState("");
+  const [entries, setEntries] = useState<KmFsEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [viewingFile, setViewingFile] = useState<string | null>(null);
+  const [content, setContent] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    if (!vault) return;
+    setBusy(true);
+    setError(null);
+    invoke<KmFsEntry[]>("km_fs_list", { base: vault, rel })
+      .then((list) => {
+        setEntries(list);
+        setError(null);
+      })
+      .catch((e: string) => setError(String(e)))
+      .finally(() => setBusy(false));
+  }, [vault, rel]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const join = (dir: string, name: string) =>
+    dir === "" ? name : `${dir}/${name}`;
+
+  const createFile = useCallback(() => {
+    const name = window.prompt("新文件名（建议 .md 后缀）");
+    if (!name) return;
+    invoke("km_fs_write", { base: vault, rel: join(rel, name), contents: "" })
+      .then(load)
+      .catch((e: string) => setError(String(e)));
+  }, [vault, rel, load]);
+
+  const createFolder = useCallback(() => {
+    const name = window.prompt("新文件夹名");
+    if (!name) return;
+    invoke("km_fs_mkdir", { base: vault, rel: join(rel, name) })
+      .then(load)
+      .catch((e: string) => setError(String(e)));
+  }, [vault, rel, load]);
+
+  const uploadFiles = useCallback(
+    async (files: File[]) => {
+      setStatus(`正在写入 ${files.length} 个文件…`);
+      let done = 0;
+      for (const file of files) {
+        try {
+          const text = await file.text();
+          await invoke("km_fs_write", {
+            base: vault,
+            rel: join(rel, file.name),
+            contents: text,
+          });
+          done += 1;
+        } catch (e) {
+          setStatus(`写入 ${file.name} 失败: ${String(e)}`);
+        }
+      }
+      setStatus(`已写入 ${done} 个文件到 ${rel || "根目录"}`);
+      load();
+    },
+    [vault, rel, load],
+  );
+
+  const syncToKm = useCallback(() => {
+    setStatus("正在同步到知识库（km-ingest）…");
+    invoke<{ code: number; output: string }>("km_ingest", {
+      projectRoot: root,
+      obsidian: vault,
+      dryRun: false,
+    })
+      .then((outcome) =>
+        setStatus(`同步完成：${outcome.output.split("\n")[0] ?? ""}`),
+      )
+      .catch((e: string) => setStatus(`同步失败: ${e}`));
+  }, [root, vault]);
+
+  const openFile = useCallback(
+    (entry: KmFsEntry) => {
+      setViewingFile(entry.rel);
+      setContent(null);
+      invoke<string>("km_fs_read", { base: vault, rel: entry.rel })
+        .then(setContent)
+        .catch((e: string) => setContent(`(读取失败: ${e})`));
+    },
+    [vault],
+  );
+
+  if (!vault) {
+    return (
+      <KmNotice
+        text="先在 设置 → 界面 → 知识库数据源 里配置你的 Obsidian vault 路径。"
+        onRetry={load}
+      />
+    );
+  }
+
+  const crumbs = rel === "" ? [] : rel.split("/");
+  return (
+    <div
+      className="relative flex h-full min-h-0 flex-col"
+      onDragOver={(event) => {
+        event.preventDefault();
+        setDropActive(true);
+      }}
+      onDragLeave={() => setDropActive(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setDropActive(false);
+        const files = [...event.dataTransfer.files];
+        if (files.length > 0) void uploadFiles(files);
+      }}
+    >
+      <div className="flex flex-wrap items-center gap-2 border-b border-line px-4 py-2 text-[12px]">
+        <button
+          onClick={() => setRel("")}
+          className="rounded px-1.5 py-0.5 font-medium text-fg hover:text-accent"
+        >
+          {vault.split(/[\\/]/).filter(Boolean).pop() ?? "vault"}
+        </button>
+        {crumbs.map((part, index) => (
+          <span key={index} className="flex items-center gap-2">
+            <span className="text-fg-dim">/</span>
+            <button
+              onClick={() => setRel(crumbs.slice(0, index + 1).join("/"))}
+              className="rounded px-1.5 py-0.5 text-fg hover:text-accent"
+            >
+              {part}
+            </button>
+          </span>
+        ))}
+        <span className="ml-auto flex items-center gap-1.5">
+          <button
+            onClick={createFile}
+            title="新建 .md 文件"
+            className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-fg-dim hover:border-accent hover:text-accent"
+          >
+            <FilePlus2 size={13} /> 新建文件
+          </button>
+          <button
+            onClick={createFolder}
+            title="新建文件夹"
+            className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-fg-dim hover:border-accent hover:text-accent"
+          >
+            <FolderPlus size={13} /> 新建文件夹
+          </button>
+          <button
+            onClick={syncToKm}
+            title="运行 km-ingest，把 vault 增量同步进知识库（供检索/卡片）"
+            className="flex items-center gap-1 rounded-lg border border-line px-2 py-1 text-fg-dim hover:border-accent hover:text-accent"
+          >
+            <RefreshCw size={13} /> 同步到知识库
+          </button>
+        </span>
+      </div>
+
+      <div className="relative min-h-0 flex-1 overflow-y-auto p-3">
+        {error && <KmNotice text={error} onRetry={load} />}
+        {!error && busy && <KmLoading />}
+        {!error && !busy && entries !== null && (
+          <div className="grid grid-cols-1 gap-1 sm:grid-cols-2 xl:grid-cols-3">
+            {entries.map((entry) => (
+              <button
+                key={entry.rel}
+                onClick={() => {
+                  if (entry.is_dir) setRel(entry.rel);
+                  else if (entry.name.toLowerCase().endsWith(".md"))
+                    openFile(entry);
+                  else
+                    setStatus(
+                      `${entry.name}（非 Markdown，暂不支持在界面中打开）`,
+                    );
+                }}
+                className="flex items-center gap-2 rounded-lg border border-transparent px-2.5 py-2 text-left text-[13px] hover:border-line hover:bg-active"
+              >
+                <span className="shrink-0">
+                  {entry.is_dir ? (
+                    <FolderOpen size={14} className="text-accent" />
+                  ) : (
+                    <BookOpen size={14} className="text-fg-dim" />
+                  )}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-fg">
+                  {entry.name}
+                </span>
+                {!entry.is_dir && (
+                  <span className="shrink-0 text-[11px] text-fg-dim">
+                    {entry.size > 1024
+                      ? `${Math.round(entry.size / 1024)}KB`
+                      : `${entry.size}B`}
+                  </span>
+                )}
+              </button>
+            ))}
+            {entries.length === 0 && (
+              <div className="p-4 text-[13px] text-fg-dim">
+                空目录——拖入 .md 文件，或点右上角新建。
+              </div>
+            )}
+          </div>
+        )}
+        {dropActive && (
+          <div className="pointer-events-none absolute inset-3 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-accent bg-accent-soft/60 text-[14px] text-accent">
+            松手写入 {rel || "根目录"}
+          </div>
+        )}
+      </div>
+
+      {status && (
+        <div className="border-t border-line px-4 py-2 text-[12px] text-fg-dim">
+          {status}
+        </div>
+      )}
+
+      {viewingFile && (
+        <div className="fixed inset-0 z-40 flex justify-end">
+          <div
+            className="absolute inset-0 bg-black/30"
+            onClick={() => setViewingFile(null)}
+          />
+          <aside className="relative z-10 flex h-full w-[560px] max-w-[85vw] flex-col border-l border-line bg-bg shadow-2xl">
+            <header className="flex items-start gap-2 border-b border-line px-4 py-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-[11px] text-fg-dim">vault 文件</div>
+                <h3 className="truncate text-[15px] font-semibold">
+                  {viewingFile}
+                </h3>
+              </div>
+              <button
+                onClick={() => setViewingFile(null)}
+                className="rounded-lg border border-line px-2 py-1 text-[12px] text-fg-dim hover:text-fg"
+              >
+                ✕
+              </button>
+            </header>
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+              {content === null && <KmLoading />}
+              {content !== null && (
+                <pre className="whitespace-pre-wrap font-sans text-[13px] leading-relaxed">
+                  {content}
+                </pre>
+              )}
+            </div>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
