@@ -196,7 +196,7 @@ function KmCardsView() {
 function KmGraphView() {
   const root = useProjectRoot();
   const loader = useCallback(
-    () => invoke<KmGraphData>("km_graph", { projectRoot: root, limit: 300 }),
+    () => invoke<KmGraphData>("km_graph", { projectRoot: root, limit: 100 }),
     [root],
   );
   const { data, error, loading, reload } = useKmData<KmGraphData>(loader);
@@ -206,8 +206,8 @@ function KmGraphView() {
     <div className="flex flex-col gap-3 p-6">
       <div className="flex items-center gap-4 text-[12px] text-fg-dim">
         <span>
-          {data.nodes.length} 节点 · {data.edges.length} 条真实引用边
-          {data.truncated && "（已截断到前 300 个）"}
+          {data.nodes.length} 节点（按连接度取前 {data.nodes.length}）· {data.edges.length} 条真实引用边
+          {data.truncated && "· 已从全库截断"}
         </span>
         {Object.entries(SOURCE_COLORS).map(([source, color]) => (
           <span key={source} className="flex items-center gap-1">

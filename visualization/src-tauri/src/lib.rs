@@ -247,60 +247,92 @@ fn km_graph(project_root: String, limit: Option<usize>) -> Result<KmGraph, Strin
         .map_err(|e| format!("Cannot read knowledge index: {e}"))?;
     let index: KmIndex =
         serde_json::from_str(&text).map_err(|e| format!("Knowledge index is invalid: {e}"))?;
-    let max = limit.unwrap_or(400).min(2000);
+    let max = limit.unwrap_or(100).min(2000);
 
-    // Path stem -> km_id for resolving wiki-link targets to nodes.
+    // Collect every live node, then resolve links by path stem OR title so
+    // `[[Note 49]]` matches a note stored at `notes/d00/note-00049.md`.
     let mut by_stem: std::collections::HashMap<String, String> = Default::default();
-    let mut nodes: Vec<KmNode> = Vec::new();
+    let mut by_title: std::collections::HashMap<String, String> = Default::default();
+    let mut live: Vec<(String, &KmIndexEntry)> = Vec::new();
     for (path, entry) in index.entries.iter() {
         if entry.tombstoned || entry.km_id.is_empty() {
             continue;
-        }
-        if nodes.len() >= max {
-            break;
         }
         let stem = Path::new(path)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(path)
-            .to_string();
-        by_stem.insert(stem.to_lowercase(), entry.km_id.clone());
-        nodes.push(KmNode {
-            id: entry.km_id.clone(),
-            title: if entry.title.is_empty() { stem } else { entry.title.clone() },
-            path: path.clone(),
-            source: entry.source.clone(),
-            tags: entry.tags.iter().take(6).cloned().collect(),
-        });
-    }
-    let known: std::collections::HashSet<String> =
-        nodes.iter().map(|n| n.id.clone()).collect();
-    let mut edges: Vec<KmEdge> = Vec::new();
-    'outer: for (_path, entry) in index.entries.iter() {
-        if entry.tombstoned || entry.km_id.is_empty() || !known.contains(&entry.km_id) {
-            continue;
+            .to_lowercase();
+        by_stem.insert(stem.clone(), entry.km_id.clone());
+        if !entry.title.is_empty() {
+            by_title.insert(entry.title.to_lowercase(), entry.km_id.clone());
         }
+        live.push((path.clone(), entry));
+    }
+
+    // Resolve every real link edge first (deduplicated), counting degrees so
+    // the displayed subgraph keeps the most-connected documents.
+    let mut edge_set: std::collections::HashSet<(String, String)> = Default::default();
+    let mut degree: std::collections::HashMap<String, usize> = Default::default();
+    for (path, entry) in &live {
         for link in &entry.links {
             let stem = Path::new(link)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or(link.as_str())
                 .to_lowercase();
-            if let Some(target) = by_stem.get(&stem) {
-                if target != &entry.km_id {
-                    edges.push(KmEdge {
-                        from: entry.km_id.clone(),
-                        to: target.clone(),
-                    });
+            let target = by_stem
+                .get(&stem)
+                .or_else(|| by_title.get(&stem))
+                .cloned();
+            if let Some(target) = target {
+                if target != entry.km_id
+                    && edge_set.insert((entry.km_id.clone(), target.clone()))
+                {
+                    *degree.entry(entry.km_id.clone()).or_insert(0) += 1;
+                    *degree.entry(target).or_insert(0) += 1;
                 }
             }
-            if edges.len() >= max * 4 {
-                break 'outer;
-            }
+            let _ = path;
         }
     }
+
+    // Keep the `max` highest-degree nodes (ties broken by path), rebuild the
+    // edge list among them.
+    let total_live = live.len();
+    let mut kept: Vec<(usize, String, &KmIndexEntry)> = live
+        .into_iter()
+        .map(|(path, entry)| {
+            let d = degree.get(&entry.km_id).copied().unwrap_or(0);
+            (d, path, entry)
+        })
+        .collect();
+    kept.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    kept.truncate(max);
+    let known: std::collections::HashSet<String> =
+        kept.iter().map(|(_, _, e)| e.km_id.clone()).collect();
+    let mut nodes: Vec<KmNode> = kept
+        .into_iter()
+        .map(|(_, path, entry)| KmNode {
+            id: entry.km_id.clone(),
+            title: if entry.title.is_empty() {
+                path.strip_suffix(".md").unwrap_or(&path).to_string()
+            } else {
+                entry.title.clone()
+            },
+            path,
+            source: entry.source.clone(),
+            tags: entry.tags.iter().take(6).cloned().collect(),
+        })
+        .collect();
+    nodes.sort_by(|a, b| a.path.cmp(&b.path));
+    let edges: Vec<KmEdge> = edge_set
+        .into_iter()
+        .filter(|(from, to)| known.contains(from) && known.contains(to))
+        .map(|(from, to)| KmEdge { from, to })
+        .collect();
     Ok(KmGraph {
-        truncated: nodes.len() >= max,
+        truncated: total_live > max,
         nodes,
         edges,
     })
