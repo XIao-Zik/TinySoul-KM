@@ -22,9 +22,27 @@ import { sendUserMessage } from "../chat/turnController";
 
 type KmView = "search" | "cards" | "graph" | "ingest";
 
-interface KmCard {
-  day: string;
+interface KmCardSource {
+  id: string;
+  title: string;
   path: string;
+  source: string;
+}
+
+interface KmCardEntry {
+  day: string;
+  question: string;
+  answer: string;
+  tags: string[];
+  confidence: string;
+  sources: KmCardSource[];
+}
+
+interface KmDocument {
+  id: string;
+  title: string;
+  path: string;
+  source: string;
   markdown: string;
 }
 
@@ -70,6 +88,7 @@ const SOURCE_COLORS: Record<string, string> = {
 
 export function KmPage() {
   const [view, setView] = useState<KmView>("search");
+  const [viewing, setViewing] = useState<KmDocHit | null>(null);
   const views: { key: KmView; label: string; icon: typeof Search }[] = [
     { key: "search", label: "检索", icon: Search },
     { key: "cards", label: "卡片流", icon: BookOpen },
@@ -94,10 +113,11 @@ export function KmPage() {
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         {view === "search" && <KmSearchView />}
-        {view === "cards" && <KmCardsView />}
+        {view === "cards" && <KmCardsView onOpenDoc={setViewing} />}
         {view === "graph" && <KmGraphView />}
         {view === "ingest" && <KmIngestView />}
       </div>
+      <KmDocDrawer doc={viewing} onClose={() => setViewing(null)} />
     </div>
   );
 }
@@ -178,38 +198,151 @@ function useKmData<T>(loader: () => Promise<T>) {
   return { data, error, loading, reload };
 }
 
-function KmCardsView() {
+const CONFIDENCE_STYLE: Record<string, string> = {
+  high: "text-emerald-600 bg-emerald-500/10",
+  medium: "text-amber-600 bg-amber-500/10",
+  low: "text-fg-dim bg-line",
+};
+
+function KmCardsView({ onOpenDoc }: { onOpenDoc: (doc: KmDocHit) => void }) {
   const root = useProjectRoot();
   const loader = useCallback(
-    () => invoke<KmCard[]>("km_cards", { projectRoot: root }),
+    () => invoke<KmCardEntry[]>("km_cards", { projectRoot: root }),
     [root],
   );
-  const { data, error, loading, reload } = useKmData<KmCard[]>(loader);
+  const { data, error, loading, reload } = useKmData<KmCardEntry[]>(loader);
   if (error) return <KmNotice text={error} onRetry={reload} />;
   if (loading || data === null) return <KmLoading />;
   if (data.length === 0)
     return <KmNotice text="还没有知识卡片——每日反思会自动生成。" onRetry={reload} />;
   return (
     <div className="grid grid-cols-1 gap-4 p-6 lg:grid-cols-2 xl:grid-cols-3">
-      {data.flatMap((card) =>
-        card.markdown
-          .split("## 卡片")
-          .slice(1)
-          .map((section, index) => (
-            <div
-              key={`${card.day}-${index}`}
-              className="rounded-xl border border-line bg-bg-elev p-4 text-[13px] leading-relaxed"
-            >
-              <div className="mb-2 flex items-center justify-between text-[11px] text-fg-dim">
-                <span className="rounded bg-accent-soft px-1.5 py-0.5 text-accent">
-                  知识卡片
+      {data.map((card, index) => (
+        <div
+          key={`${card.day}-${index}`}
+          className="flex flex-col gap-2 rounded-xl border border-line bg-bg-elev p-4 text-[13px] leading-relaxed"
+        >
+          <div className="flex items-center justify-between text-[11px] text-fg-dim">
+            <span className="rounded bg-accent-soft px-1.5 py-0.5 text-accent">
+              知识卡片
+            </span>
+            <span className="flex items-center gap-2">
+              <span
+                className={`rounded px-1.5 py-0.5 ${
+                  CONFIDENCE_STYLE[card.confidence] ?? CONFIDENCE_STYLE.low
+                }`}
+              >
+                {card.confidence}
+              </span>
+              {card.day}
+            </span>
+          </div>
+          <div className="font-semibold text-fg">{card.question}</div>
+          <p className="whitespace-pre-wrap text-fg-dim">{card.answer}</p>
+          {card.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {card.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded bg-line px-1.5 py-0.5 text-[11px] text-fg-dim"
+                >
+                  {tag}
                 </span>
-                <span>{card.day}</span>
-              </div>
-              <pre className="whitespace-pre-wrap font-sans">{section.trim()}</pre>
+              ))}
             </div>
-          )),
-      )}
+          )}
+          {card.sources.length > 0 && (
+            <div className="mt-auto flex flex-wrap gap-1.5 border-t border-line pt-2.5">
+              {card.sources.map((source) => (
+                <button
+                  key={source.id}
+                  onClick={() =>
+                    onOpenDoc({
+                      id: source.id,
+                      title: source.title,
+                      path: source.path,
+                      source: source.source,
+                    })
+                  }
+                  className="flex items-center gap-1.5 rounded-md border border-line px-2 py-1 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-accent"
+                  title={`查看来源：${source.title}`}
+                >
+                  <span
+                    className="inline-block h-1.5 w-1.5 rounded-full"
+                    style={{
+                      background: SOURCE_COLORS[source.source] ?? "#94a3b8",
+                    }}
+                  />
+                  {source.title.slice(0, 22)}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Right-side drawer showing one knowledge document's full Markdown. */
+function KmDocDrawer({
+  doc,
+  onClose,
+}: {
+  doc: KmDocHit | null;
+  onClose: () => void;
+}) {
+  const [content, setContent] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const root = useProjectRoot();
+
+  useEffect(() => {
+    if (!doc) {
+      setContent(null);
+      setError(null);
+      return;
+    }
+    setContent(null);
+    setError(null);
+    invoke<KmDocument>("km_document", { projectRoot: root, kmId: doc.id })
+      .then((document) => setContent(document.markdown))
+      .catch((e: string) => setError(String(e)));
+  }, [doc, root]);
+
+  if (!doc) return null;
+  return (
+    <div className="fixed inset-0 z-40 flex justify-end">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <aside className="relative z-10 flex h-full w-[560px] max-w-[85vw] flex-col border-l border-line bg-bg shadow-2xl">
+        <header className="flex items-start gap-2 border-b border-line px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 text-[11px] text-fg-dim">
+              <span
+                className="inline-block h-2 w-2 rounded-full"
+                style={{ background: SOURCE_COLORS[doc.source] ?? "#94a3b8" }}
+              />
+              {doc.source}
+            </div>
+            <h3 className="truncate text-[15px] font-semibold">{doc.title}</h3>
+            <p className="truncate text-[11px] text-fg-dim">{doc.path}</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-line px-2 py-1 text-[12px] text-fg-dim hover:text-fg"
+          >
+            ✕
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+          {error && <p className="text-[13px] text-warning">{error}</p>}
+          {!error && content === null && <KmLoading />}
+          {content !== null && (
+            <pre className="whitespace-pre-wrap font-sans text-[13px] leading-relaxed">
+              {content}
+            </pre>
+          )}
+        </div>
+      </aside>
     </div>
   );
 }

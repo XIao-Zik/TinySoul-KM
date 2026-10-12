@@ -190,6 +190,58 @@ pub struct KmDocHit {
     pub source: String,
 }
 
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct KmCardSource {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+    pub source: String,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct KmCardEntry {
+    pub day: String,
+    pub question: String,
+    pub answer: String,
+    pub tags: Vec<String>,
+    pub confidence: String,
+    pub sources: Vec<KmCardSource>,
+}
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct KmDocument {
+    pub id: String,
+    pub title: String,
+    pub path: String,
+    pub source: String,
+    pub markdown: String,
+}
+
+/// One knowledge document's full Markdown, addressed by stable km id.
+#[tauri::command]
+fn km_document(project_root: String, km_id: String) -> Result<KmDocument, String> {
+    let entries = km_live_entries(&project_root)?;
+    let (path, entry) = entries
+        .iter()
+        .find(|(_, e)| e.km_id == km_id)
+        .ok_or_else(|| format!("Knowledge document not found: {km_id}"))?;
+    let base = match entry.source.as_str() {
+        "chat" => "chats",
+        "card" => "cards",
+        _ => "notes",
+    };
+    let full = km_root(&project_root)?.join(base).join(path);
+    let markdown = fs::read_to_string(&full)
+        .map_err(|e| format!("Cannot read {}: {e}", full.display()))?;
+    Ok(KmDocument {
+        id: entry.km_id.clone(),
+        title: km_doc_hit(path, entry).title,
+        path: path.clone(),
+        source: entry.source.clone(),
+        markdown,
+    })
+}
+
 fn km_live_entries(project_root: &str) -> Result<Vec<(String, KmIndexEntry)>, String> {
     let index_path = km_root(project_root)?
         .join(".tinysoul_knowledge")
@@ -424,16 +476,24 @@ fn km_root(project_root: &str) -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-fn km_cards(project_root: String) -> Result<Vec<KmCard>, String> {
+fn km_cards(project_root: String) -> Result<Vec<KmCardEntry>, String> {
     let cards_dir = km_root(&project_root)?.join("cards");
-    let mut cards = Vec::new();
-    let entries = fs::read_dir(&cards_dir)
+    let entries = km_live_entries(&project_root)?;
+    let by_id: std::collections::HashMap<&str, (&String, &KmIndexEntry)> = entries
+        .iter()
+        .map(|(path, e)| (e.km_id.as_str(), (path, e)))
+        .collect();
+
+    let mut cards: Vec<KmCardEntry> = Vec::new();
+    let files = fs::read_dir(&cards_dir)
         .map_err(|e| format!("Cannot read cards directory: {e}"))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
+    let mut paths: Vec<std::path::PathBuf> = files
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
+    paths.sort_by(|a, b| b.cmp(a));
+    for path in paths {
         let day = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -441,13 +501,76 @@ fn km_cards(project_root: String) -> Result<Vec<KmCard>, String> {
             .to_string();
         let markdown = fs::read_to_string(&path)
             .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-        cards.push(KmCard {
-            day,
-            path: path.to_string_lossy().to_string(),
-            markdown,
-        });
+        for section in markdown.split("## 卡片").skip(1) {
+            let mut question = String::new();
+            let mut tags: Vec<String> = Vec::new();
+            let mut sources: Vec<KmCardSource> = Vec::new();
+            let mut confidence = String::new();
+            let mut answer_lines: Vec<&str> = Vec::new();
+            let mut in_answer = false;
+            for line in section.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("**Q:") {
+                    question = rest.trim().trim_end_matches("**").to_string();
+                    in_answer = true;
+                } else if let Some(rest) = trimmed.strip_prefix("- 标签:") {
+                    in_answer = false;
+                    tags = rest
+                        .split(',')
+                        .map(|item| item.trim().to_string())
+                        .filter(|item| !item.is_empty())
+                        .collect();
+                } else if let Some(rest) = trimmed.strip_prefix("- 来源:") {
+                    in_answer = false;
+                    for reference in rest.split(',') {
+                        let id = reference.trim().trim_start_matches("km:").to_string();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        match by_id.get(id.as_str()) {
+                            Some((path, entry)) => sources.push(KmCardSource {
+                                id: id.clone(),
+                                title: km_doc_hit(path, entry).title,
+                                path: (*path).clone(),
+                                source: entry.source.clone(),
+                            }),
+                            None => sources.push(KmCardSource {
+                                id: id.clone(),
+                                title: id.clone(),
+                                path: String::new(),
+                                source: String::new(),
+                            }),
+                        }
+                    }
+                } else if let Some(rest) = trimmed.strip_prefix("- 置信度:") {
+                    in_answer = false;
+                    confidence = rest.trim().to_string();
+                } else if in_answer && !trimmed.is_empty() {
+                    answer_lines.push(trimmed);
+                }
+            }
+            if question.is_empty() && answer_lines.is_empty() && sources.is_empty() {
+                continue;
+            }
+            cards.push(KmCardEntry {
+                day: day.clone(),
+                question: if question.is_empty() {
+                    "(未解析的问题)".to_string()
+                } else {
+                    question
+                },
+                answer: answer_lines.join("
+"),
+                tags,
+                confidence: if confidence.is_empty() {
+                    "medium".to_string()
+                } else {
+                    confidence
+                },
+                sources,
+            });
+        }
     }
-    cards.sort_by(|a, b| b.day.cmp(&a.day));
     Ok(cards)
 }
 
@@ -646,6 +769,7 @@ pub fn run() {
             km_graph,
             km_find_docs,
             km_neighborhood,
+            km_document,
             km_ingest
         ])
         .run(tauri::generate_context!())
