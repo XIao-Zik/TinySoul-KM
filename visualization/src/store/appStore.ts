@@ -55,7 +55,6 @@ export interface AppState {
   locale: Locale;
   activeTab: AppTab;
   projectRoot: string;
-  kmVaultRoot: string;
   toasts: ToastItem[];
 
   setTheme: (theme: ThemeMode) => void;
@@ -63,7 +62,6 @@ export interface AppState {
   toggleTheme: () => void;
   setActiveTab: (tab: AppTab) => void;
   setProjectRoot: (root: string) => void;
-  setKmVaultRoot: (root: string) => void;
   pushToast: (
     kind: ToastItem["kind"],
     text: string,
@@ -79,7 +77,6 @@ export const useAppStore = create<AppState>()(
       locale: DEFAULT_LOCALE,
       activeTab: "chat",
       projectRoot: "D:/ProgramData/RESUME/my-pkm",
-      kmVaultRoot: "",
       toasts: [],
 
       setTheme: (theme) => set({ theme }),
@@ -88,7 +85,6 @@ export const useAppStore = create<AppState>()(
         set((state) => ({ theme: state.theme === "dark" ? "light" : "dark" })),
       setActiveTab: (activeTab) => set({ activeTab }),
       setProjectRoot: (projectRoot) => set({ projectRoot }),
-      setKmVaultRoot: (kmVaultRoot) => set({ kmVaultRoot }),
 
       pushToast: (kind, text, action) =>
         set((state) => ({
@@ -104,7 +100,6 @@ export const useAppStore = create<AppState>()(
       name: "tinysoul-ui-state",
       partialize: (state) => ({
         projectRoot: state.projectRoot,
-        kmVaultRoot: state.kmVaultRoot,
         theme: state.theme,
         locale: state.locale,
         activeTab: normalizePersistedActiveTab(state.activeTab),
@@ -120,10 +115,6 @@ export const useAppStore = create<AppState>()(
             typeof persisted.projectRoot === "string"
               ? persisted.projectRoot
               : currentState.projectRoot,
-          kmVaultRoot:
-            typeof persisted.kmVaultRoot === "string"
-              ? persisted.kmVaultRoot
-              : currentState.kmVaultRoot,
           theme:
             persisted.theme === "light" || persisted.theme === "dark"
               ? persisted.theme

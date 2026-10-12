@@ -242,100 +242,6 @@ fn km_document(project_root: String, km_id: String) -> Result<KmDocument, String
     })
 }
 
-// -- KM vault file browser (user-configured external directory) -------------
-//
-// The KM "files" view browses a user-configured directory (typically the
-// Obsidian vault) directly. Paths are always resolved as base + relative
-// with `..` rejected, so commands cannot escape the configured root.
-
-fn km_fs_path(base: &str, rel: &str) -> Result<PathBuf, String> {
-    let base_path = Path::new(base);
-    if !base_path.is_dir() {
-        return Err(format!("KM 数据源目录不存在: {base}"));
-    }
-    let relative = Path::new(rel);
-    if relative.is_absolute()
-        || relative
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(format!("非法路径: {rel}"));
-    }
-    Ok(base_path.join(relative))
-}
-
-#[derive(serde::Serialize, Clone, Debug)]
-pub struct KmFsEntry {
-    pub name: String,
-    pub rel: String,
-    pub is_dir: bool,
-    pub size: u64,
-}
-
-#[tauri::command]
-fn km_fs_list(base: String, rel: String) -> Result<Vec<KmFsEntry>, String> {
-    let dir = km_fs_path(&base, &rel)?;
-    if !dir.is_dir() {
-        return Err(format!("不是目录: {rel}"));
-    }
-    let mut entries: Vec<KmFsEntry> = Vec::new();
-    for entry in fs::read_dir(&dir)
-        .map_err(|e| format!("无法读取目录: {e}"))?
-        .flatten()
-    {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        let rel_child = if rel.is_empty() {
-            name.clone()
-        } else {
-            format!("{rel}/{name}")
-        };
-        entries.push(KmFsEntry {
-            name,
-            rel: rel_child,
-            is_dir,
-            size,
-        });
-    }
-    entries.sort_by(|a, b| {
-        b.is_dir
-            .cmp(&a.is_dir)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    Ok(entries)
-}
-
-#[tauri::command]
-fn km_fs_read(base: String, rel: String) -> Result<String, String> {
-    let path = km_fs_path(&base, &rel)?;
-    let metadata = path
-        .metadata()
-        .map_err(|e| format!("无法读取文件信息: {e}"))?;
-    if metadata.len() > 2_000_000 {
-        return Err("文件超过 2MB，暂不支持在界面中打开".to_string());
-    }
-    fs::read_to_string(&path).map_err(|e| format!("无法读取文件: {e}"))
-}
-
-#[tauri::command]
-fn km_fs_write(base: String, rel: String, contents: String) -> Result<(), String> {
-    let path = km_fs_path(&base, &rel)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("无法创建目录: {e}"))?;
-    }
-    fs::write(&path, contents).map_err(|e| format!("无法写入文件: {e}"))
-}
-
-#[tauri::command]
-fn km_fs_mkdir(base: String, rel: String) -> Result<(), String> {
-    let path = km_fs_path(&base, &rel)?;
-    fs::create_dir_all(&path).map_err(|e| format!("无法创建目录: {e}"))
-}
-
 fn km_live_entries(project_root: &str) -> Result<Vec<(String, KmIndexEntry)>, String> {
     let index_path = km_root(project_root)?
         .join(".tinysoul_knowledge")
@@ -864,10 +770,6 @@ pub fn run() {
             km_find_docs,
             km_neighborhood,
             km_document,
-            km_fs_list,
-            km_fs_read,
-            km_fs_write,
-            km_fs_mkdir,
             km_ingest
         ])
         .run(tauri::generate_context!())

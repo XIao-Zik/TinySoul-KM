@@ -50,8 +50,6 @@ export function InterfacePage() {
   const setTheme = useAppStore((s) => s.setTheme);
   const locale = useAppStore((s) => s.locale);
   const setLocale = useAppStore((s) => s.setLocale);
-  const kmVaultRoot = useAppStore((s) => s.kmVaultRoot);
-  const setKmVaultRoot = useAppStore((s) => s.setKmVaultRoot);
   const prefs = useUiPrefsStore();
   const resetDefaults = useUiPrefsStore((s) => s.resetDefaults);
 
@@ -149,25 +147,6 @@ export function InterfacePage() {
           <LocalSwitch
             on={prefs.reducedMotion}
             onChange={(next) => prefs.setPref("reducedMotion", next)}
-          />
-        </PrefRow>
-      </SectionCard>
-
-      <SectionCard
-        title="知识库数据源"
-        description="KM「文件」视图浏览与保存的目录——填你的 Obsidian vault 根目录，即可与本机知识管理共用一个文件夹。仅存储在本客户端。"
-      >
-        <PrefRow
-          label="Vault 路径"
-          description="例如 D:\\Obsidian\\MyVault。改动即时生效并保存在本地。"
-        >
-          <input
-            type="text"
-            value={kmVaultRoot}
-            onChange={(event) => setKmVaultRoot(event.target.value)}
-            placeholder="D:\\Obsidian\\MyVault"
-            spellCheck={false}
-            className="h-8 w-72 rounded-lg border border-line bg-bg px-2.5 text-[13px] text-fg outline-none focus:border-accent"
           />
         </PrefRow>
       </SectionCard>
