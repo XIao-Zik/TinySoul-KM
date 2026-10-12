@@ -76,7 +76,7 @@ export const useAppStore = create<AppState>()(
       theme: "light",
       locale: DEFAULT_LOCALE,
       activeTab: "chat",
-      projectRoot: "D:/ProgramData/RESUME/my-agent",
+      projectRoot: "D:/ProgramData/RESUME/my-pkm",
       toasts: [],
 
       setTheme: (theme) => set({ theme }),
