@@ -47,7 +47,7 @@ def register_knowledge_card_action(
     tasks: ActionTaskFactory | None = None,
     llm=None,
     clock=None,
-    day_override: str | None = None,
+    day_source=None,
 ) -> ActionEngineBuilder:
     builder.register_executor(
         "km.generate_card",
@@ -58,7 +58,7 @@ def register_knowledge_card_action(
             tasks,
             llm,
             clock,
-            day_override=day_override,
+            day_source=day_source,
         ),
     )
     return builder
