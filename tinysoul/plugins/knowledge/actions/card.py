@@ -81,7 +81,7 @@ class KnowledgeCardExecutor(ActionExecutor):
         llm,
         clock,
         *,
-        day_override: str | None = None,
+        day_source=None,
     ) -> None:
         self._engine = engine
         self._settings = settings
@@ -89,7 +89,9 @@ class KnowledgeCardExecutor(ActionExecutor):
         self._tasks = tasks
         self._llm = llm
         self._clock = clock
-        self._day_override = day_override
+        # The reflection context binds its target day during turn preparation;
+        # resolve it lazily at execute time (activation is too early).
+        self._day_source = day_source
 
     async def execute(
         self, execution: ActionExecution, context: ActionExecutionContext
@@ -113,11 +115,15 @@ class KnowledgeCardExecutor(ActionExecutor):
                 execution, "Card generation requires the LLM task factory", "unavailable"
             )
         # The reflection targets a specific business day: the 00:15 run on the
-        # 13th digests documents imported on the 12th. Clock and local-today
-        # are only fallbacks for callers without an explicit target day.
-        if self._day_override is not None:
-            day_text = self._day_override
-        else:
+        # 13th digests documents imported on the 12th. The context binds its
+        # target day during turn preparation; clock/local-today are fallbacks.
+        day_text = None
+        if self._day_source is not None:
+            try:
+                day_text = self._day_source.memory_target()[0].isoformat()
+            except Exception:
+                day_text = None
+        if day_text is None:
             day = self._clock.today() if self._clock is not None else None
             day_text = day.value.isoformat() if day is not None else None
         if day_text is None:

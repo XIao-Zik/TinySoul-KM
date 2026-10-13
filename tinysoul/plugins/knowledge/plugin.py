@@ -175,7 +175,7 @@ class KnowledgePlugin:
                         tasks=profile.tasks,
                         llm=profile.llm,
                         clock=context.clock,
-                        day_override=_reflection_target_day(profile),
+                        day_source=_reflection_target_context(profile),
                     )
                 return builder
 
@@ -191,13 +191,12 @@ class KnowledgePlugin:
             profile_extension_factory=extend,
         )
 
-def _reflection_target_day(profile: ProfileBuildContext) -> str | None:
-    """The business day this Memory Reflection Turn digests, if resolvable."""
+def _reflection_target_context(profile: ProfileBuildContext):
+    """The reflection context whose target day binds during turn preparation."""
 
     try:
         from tinysoul.plugins.memory.plugin import MemoryProfileSource
 
-        target_date = profile.bindings.get(MemoryProfileSource).target.memory_target()[0]
-        return target_date.isoformat()
+        return profile.bindings.get(MemoryProfileSource).target
     except Exception:
         return None
