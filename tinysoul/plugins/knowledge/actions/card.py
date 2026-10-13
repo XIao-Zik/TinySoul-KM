@@ -100,9 +100,13 @@ class KnowledgeCardExecutor(ActionExecutor):
         self, execution: ActionExecution, context: ActionExecutionContext
     ) -> ActionResult:
         if not self._settings.reflection.enabled:
+            payload = {"cards_written": 0, "skipped": "knowledge.reflection disabled"}
             return _success(
                 execution,
-                {"cards_written": 0, "skipped": "knowledge.reflection disabled"},
+                payload,
+                trace=ActionTraceProjection(
+                    origin_refs=(), canonical_payload=payload
+                ),
             )
         if self._tasks is None or self._llm is None:
             return _failed(
@@ -123,9 +127,19 @@ class KnowledgeCardExecutor(ActionExecutor):
         try:
             candidates = self._engine.documents_imported_on(day_text)
             if not candidates:
+                payload = {
+                    "cards_written": 0,
+                    "day": day_text,
+                    "skipped": "no new documents",
+                }
+                # The catalog declares a foldable result: every success must
+                # carry a trace projection.
                 return _success(
                     execution,
-                    {"cards_written": 0, "day": day_text, "skipped": "no new documents"},
+                    payload,
+                    trace=ActionTraceProjection(
+                        origin_refs=(), canonical_payload=payload
+                    ),
                 )
             candidates = candidates[:MAX_DAILY_CANDIDATES]
             listings = []
@@ -202,24 +216,47 @@ class KnowledgeCardExecutor(ActionExecutor):
                         )
                 validated.append(raw)
             if not validated:
+                payload = {
+                    "cards_written": 0,
+                    "day": day_text,
+                    "skipped": "no valid cards",
+                }
                 return _success(
                     execution,
-                    {"cards_written": 0, "day": day_text, "skipped": "no valid cards"},
+                    payload,
+                    trace=ActionTraceProjection(
+                        origin_refs=(), canonical_payload=payload
+                    ),
                 )
             ref = self._engine.write_cards(day_text, tuple(validated), source_titles=titles)
+            payload = {
+                "cards_written": len(validated),
+                "day": day_text,
+                "card_ref": ref,
+            }
             return _success(
                 execution,
-                {
-                    "cards_written": len(validated),
-                    "day": day_text,
-                    "card_ref": ref,
-                },
+                payload,
+                trace=ActionTraceProjection(
+                    origin_refs=(ref,), canonical_payload=payload
+                ),
             )
         except Exception as exc:
-            raise self._runtime_bridge.from_knowledge_error(exc) from exc
+            import traceback
+
+            # Surface the fault as a model-visible local failure: an internal
+            # failure hides the traceback from the operator and the model.
+            detail = "".join(traceback.format_exception(exc))[-3500:]
+            feedback = f"{type(exc).__name__}: {exc}\n{detail}"
+            return _failed(execution, feedback, "internal_error")
 
 
-def _success(execution: ActionExecution, payload) -> ActionResult:
+def _success(
+    execution: ActionExecution,
+    payload,
+    *,
+    trace: ActionTraceProjection | None = None,
+) -> ActionResult:
     return ActionResult.success(
         call_id=execution.call.call_id,
         invoke_id=execution.framework.invoke_id,
@@ -228,6 +265,7 @@ def _success(execution: ActionExecution, payload) -> ActionResult:
         sequence=execution.call.sequence,
         domain=execution.framework.domain,
         payload=to_json_object(payload),
+        trace_projection=trace,
     )
 
 
