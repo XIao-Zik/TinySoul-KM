@@ -129,14 +129,18 @@ const REFLECTION_INSTRUCTIONS =
 /**
  * Daily reflection review: the first thing shown when the app opens. The
  * nightly task (00:10) should keep the backend alive for the 00:15 schedule,
- * but a missed day is surfaced here with one-click catch-up via
- * POST /v2/reflection (kind=memory, target_day).
+ * but a missed day is auto-caught-up here on first open — POST /v2/reflection
+ * (kind=memory, target_day) fires without any click, at most once per day per
+ * app session; a failed auto-request degrades to a manual retry button.
  */
+const autoSubmitted = new Set<string>();
+
 function KmReflectionBanner() {
   const clients = useConnectionStore((s) => s.clients);
   const connected = useConnectionStore((s) => s.phase === "connected");
   const [missing, setMissing] = useState<string[] | null>(null);
-  const [requested, setRequested] = useState<string[]>([]);
+  const [running, setRunning] = useState<string[]>([]);
+  const [failed, setFailed] = useState<string[]>([]);
   const [hidden, setHidden] = useState(false);
 
   const load = useCallback(() => {
@@ -153,19 +157,54 @@ function KmReflectionBanner() {
     load();
   }, [load]);
 
+  // Auto catch-up: submit once per missing day per session (newest first,
+  // capped at 3); re-check availability shortly after so the banner settles.
+  useEffect(() => {
+    if (missing === null || missing.length === 0 || clients === null) return;
+    for (const day of missing.slice(-3).reverse()) {
+      if (autoSubmitted.has(day)) continue;
+      autoSubmitted.add(day);
+      setRunning((prev) => [...prev, day]);
+      clients.reflection
+        .request({
+          kind: "memory",
+          target_day: day,
+          instructions: REFLECTION_INSTRUCTIONS,
+        })
+        .then(() => {
+          setTimeout(load, 10000);
+          setTimeout(load, 40000);
+        })
+        .catch(() => {
+          autoSubmitted.delete(day);
+          setRunning((prev) => prev.filter((d) => d !== day));
+          setFailed((prev) => [...prev, day]);
+        });
+    }
+  }, [missing, clients]);
+
   if (!connected || missing === null || hidden) return null;
 
-  const catchUp = (day: string) => {
+  const retry = (day: string) => {
     if (clients === null) return;
-    setRequested((prev) => [...prev, day]);
+    setFailed((prev) => prev.filter((d) => d !== day));
+    autoSubmitted.add(day);
+    setRunning((prev) => [...prev, day]);
     clients.reflection
       .request({
         kind: "memory",
         target_day: day,
         instructions: REFLECTION_INSTRUCTIONS,
       })
-      .then(() => setTimeout(load, 5000))
-      .catch(() => setRequested((prev) => prev.filter((d) => d !== day)));
+      .then(() => {
+        setTimeout(load, 10000);
+        setTimeout(load, 40000);
+      })
+      .catch(() => {
+        autoSubmitted.delete(day);
+        setRunning((prev) => prev.filter((d) => d !== day));
+        setFailed((prev) => [...prev, day]);
+      });
   };
 
   if (missing.length === 0) {
@@ -179,19 +218,32 @@ function KmReflectionBanner() {
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-warning/30 bg-warning-soft px-4 py-2 text-[12px]">
       <span className="text-warning">
-        有 {missing.length} 天未完成每日反思（知识卡片依赖它）
+        有 {missing.length} 天未完成每日反思
         {missing.length > shown.length && "，仅显示最近 3 天"}：
       </span>
       {shown.map((day) => (
         <span key={day} className="flex items-center gap-1.5">
           <span className="rounded bg-bg-elev px-1.5 py-0.5">{day}</span>
-          <button
-            onClick={() => catchUp(day)}
-            disabled={requested.includes(day)}
-            className="rounded border border-warning/40 px-2 py-0.5 text-warning hover:bg-warning/10 disabled:opacity-50"
-          >
-            {requested.includes(day) ? "已提交" : "补跑"}
-          </button>
+          {running.includes(day) ? (
+            <span className="flex items-center gap-1 rounded border border-warning/40 px-2 py-0.5 text-warning">
+              <Loader2 size={10} className="animate-spin" />
+              自动补跑中…
+            </span>
+          ) : failed.includes(day) ? (
+            <button
+              onClick={() => retry(day)}
+              className="rounded border border-warning/40 px-2 py-0.5 text-warning hover:bg-warning/10"
+            >
+              自动提交失败，点击重试
+            </button>
+          ) : (
+            <button
+              onClick={() => retry(day)}
+              className="rounded border border-warning/40 px-2 py-0.5 text-warning hover:bg-warning/10"
+            >
+              补跑
+            </button>
+          )}
         </span>
       ))}
       <button
