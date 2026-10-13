@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 
 import argparse
+import os
 from pathlib import Path
 from secrets import token_urlsafe
 import signal as signal_module
@@ -264,8 +265,13 @@ def _start(argv: Sequence[str]) -> int:
         with ProjectInstanceLease(root) as lease:
             endpoint_host: EndpointHost | None = None
             if args.once is None:
+                # A rotated port leaves the desktop client polling a dead
+                # address, where its instance-changed reconnect never fires;
+                # a stable port (and token) keeps that path alive.
                 endpoint_settings = EndpointSettings(
-                    token=token_urlsafe(32),
+                    port=int(os.environ.get("TINYSOUL_ENDPOINT_PORT") or 0),
+                    token=os.environ.get("TINYSOUL_ENDPOINT_TOKEN")
+                    or token_urlsafe(32),
                     instance_id=lease.identity.instance_id,
                     project_identity=lease.identity.project_identity,
                 )
