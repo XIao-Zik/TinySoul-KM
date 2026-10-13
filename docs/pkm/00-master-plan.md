@@ -1,5 +1,8 @@
 # TinySoul-KM 总体计划（总纲）
 
+> **当前执行依据：[08-execution-record.md](08-execution-record.md)**（已完成能力压缩记录 + 待实施特性设计与任务清单）。
+> 本文与 01–07 为设计论证历史；与实施不符之处以执行文档为准。
+
 > 状态：草案 v1（待确认 D1 技术路线后定稿）
 > 日期：2026-10-11
 > 分支：`pkm`（基线 tag `upstream-baseline`）
