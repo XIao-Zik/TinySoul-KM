@@ -124,6 +124,8 @@
 
 - **连续 3 天自动运行**：Day 1（2026-10-12）已真实记录。**Day 2 补录（2026-10-13）**：发现并修复两个问题——(1) 00:15 定时反思触发时后端进程已崩溃（ConnectionResetError），反思从未运行；(2) 执行器日目标 bug：00:15 的反思针对前一日，但执行器扫描"今天"的导入导致空扫。修复后手动补跑 target_day=2026-10-12 的 Memory Reflection，真实生成新卡片（2026-10-12.md 现共 4 张，来源引用全部指向活文档）。**教训：定时卡片要求后端在 00:15 存活；进程稳定性成为 M4 验收的实际前置。** Day 3（10-14）继续。
 
+**反思轮崩溃根因链（2026-10-13 排障，全部修复）**：用户侧反思轮 4 秒内 `action.internal_failure`。逐层定位：(1) 主凶——`km.generate_card` 在 catalog 声明 `trace_mode=foldable`，但执行器成功返回未携带 trace 投影，违反 runner 的结果 trace 策略（`ActionInvariantError: violated the result trace policy`，通过 endpoint 事件流 WS 捕获 + `from_action_error` 临时栈打印确诊）；(2) 次凶——目标日在激活期解析（此时反思上下文未绑定，静默回退到当天），改为执行期从 `MemoryReflectionContext` 惰性解析；(3) 执行器内部异常原先升级为不可见 internal failure，现降级为带完整栈的模型可见本地失败。**修复后 Day-2 补录验证通过**：`cards/2026-10-11.md` 生成 4 张卡片，12/12 来源引用指向活文档。遗留：flash 对 `memory.write_daily` 的 Markdown 格式遵从差，反思缺口（memory daily）可能清不掉——卡片链路不受影响，换有余额模型可解。
+
 **自动化落地（2026-10-13，最终形态）**：KM 页顶部横幅读 `GET /v2/reflection` 的 `missing_daily_days`，**打开程序发现缺口即自动逐日提交补跑**（`POST /v2/reflection` kind=memory target_day；每会话每日一次防重复，失败退化为手动按钮），零后端改动、零系统侵入。设计决定：曾做过 00:10 计划任务自启动后端，按用户要求移除——软件不应静默注册系统计划任务。后端进程由用户自行启动（`tinysoul start --root my-pkm`）；00:15 活着则定时出卡，错过则打开程序时自动补跑，两种路径殊途同归。
 - 反思轮偶发 `action.internal_failure` 收尾（flash 在 core.answer 里传 km: refs 被 core 解析器拒绝后循环至预算耗尽；core 的 reference_resolvers 硬编码只有 workspace，km 引用无法进入 core.answer 的 references 参数——属上游扩展点限制，已记入待办：flash 质量问题+上游扩展点，不影响卡片生成主链路）。
 - glm-4.5-flash 驱动反思轮的稳定性有限（同一指令时而调用时而忽略 km.generate_card）；换更强模型即改善（等待有余额凭据）。
