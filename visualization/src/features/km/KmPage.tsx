@@ -112,12 +112,95 @@ export function KmPage() {
         ))}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
+        <KmReflectionBanner />
         {view === "search" && <KmSearchView />}
         {view === "cards" && <KmCardsView onOpenDoc={setViewing} />}
         {view === "graph" && <KmGraphView />}
         {view === "ingest" && <KmIngestView />}
       </div>
       <KmDocDrawer doc={viewing} onClose={() => setViewing(null)} />
+    </div>
+  );
+}
+
+const REFLECTION_INSTRUCTIONS =
+  "调用一次 km.generate_card 生成该日导入文档的知识卡片；随后用 memory.write_daily 完成当日 Memory。";
+
+/**
+ * Daily reflection review: the first thing shown when the app opens. The
+ * nightly task (00:10) should keep the backend alive for the 00:15 schedule,
+ * but a missed day is surfaced here with one-click catch-up via
+ * POST /v2/reflection (kind=memory, target_day).
+ */
+function KmReflectionBanner() {
+  const clients = useConnectionStore((s) => s.clients);
+  const connected = useConnectionStore((s) => s.phase === "connected");
+  const [missing, setMissing] = useState<string[] | null>(null);
+  const [requested, setRequested] = useState<string[]>([]);
+  const [hidden, setHidden] = useState(false);
+
+  const load = useCallback(() => {
+    if (!connected || clients === null) {
+      setMissing(null);
+      return;
+    }
+    clients.reflection
+      .availability()
+      .then((response) => setMissing(response.availability.missing_daily_days))
+      .catch(() => setMissing(null));
+  }, [connected, clients]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (!connected || missing === null || hidden) return null;
+
+  const catchUp = (day: string) => {
+    if (clients === null) return;
+    setRequested((prev) => [...prev, day]);
+    clients.reflection
+      .request({
+        kind: "memory",
+        target_day: day,
+        instructions: REFLECTION_INSTRUCTIONS,
+      })
+      .then(() => setTimeout(load, 5000))
+      .catch(() => setRequested((prev) => prev.filter((d) => d !== day)));
+  };
+
+  if (missing.length === 0) {
+    return (
+      <div className="border-b border-line px-4 py-1.5 text-[12px] text-fg-dim">
+        每日反思：无缺口。
+      </div>
+    );
+  }
+  const shown = missing.slice(-3);
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b border-warning/30 bg-warning-soft px-4 py-2 text-[12px]">
+      <span className="text-warning">
+        有 {missing.length} 天未完成每日反思（知识卡片依赖它）
+        {missing.length > shown.length && "，仅显示最近 3 天"}：
+      </span>
+      {shown.map((day) => (
+        <span key={day} className="flex items-center gap-1.5">
+          <span className="rounded bg-bg-elev px-1.5 py-0.5">{day}</span>
+          <button
+            onClick={() => catchUp(day)}
+            disabled={requested.includes(day)}
+            className="rounded border border-warning/40 px-2 py-0.5 text-warning hover:bg-warning/10 disabled:opacity-50"
+          >
+            {requested.includes(day) ? "已提交" : "补跑"}
+          </button>
+        </span>
+      ))}
+      <button
+        onClick={() => setHidden(true)}
+        className="ml-auto text-fg-dim hover:text-fg"
+        title="本次会话不再提示"
+      >
+        ✕
+      </button>
     </div>
   );
 }
