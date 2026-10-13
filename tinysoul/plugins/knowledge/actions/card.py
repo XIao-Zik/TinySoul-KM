@@ -47,11 +47,18 @@ def register_knowledge_card_action(
     tasks: ActionTaskFactory | None = None,
     llm=None,
     clock=None,
+    day_override: str | None = None,
 ) -> ActionEngineBuilder:
     builder.register_executor(
         "km.generate_card",
         KnowledgeCardExecutor(
-            engine, settings, runtime_bridge, tasks, llm, clock
+            engine,
+            settings,
+            runtime_bridge,
+            tasks,
+            llm,
+            clock,
+            day_override=day_override,
         ),
     )
     return builder
@@ -73,6 +80,8 @@ class KnowledgeCardExecutor(ActionExecutor):
         tasks: ActionTaskFactory | None,
         llm,
         clock,
+        *,
+        day_override: str | None = None,
     ) -> None:
         self._engine = engine
         self._settings = settings
@@ -80,8 +89,14 @@ class KnowledgeCardExecutor(ActionExecutor):
         self._tasks = tasks
         self._llm = llm
         self._clock = clock
+        self._day_override = day_override
 
     async def execute(
+        self, execution: ActionExecution, context: ActionExecutionContext
+    ) -> ActionResult:
+        return await self._execute(execution, context)
+
+    async def _execute(
         self, execution: ActionExecution, context: ActionExecutionContext
     ) -> ActionResult:
         if not self._settings.reflection.enabled:
@@ -93,10 +108,15 @@ class KnowledgeCardExecutor(ActionExecutor):
             return _failed(
                 execution, "Card generation requires the LLM task factory", "unavailable"
             )
-        day = (self._clock.today() if self._clock is not None else None)
-        day_text = day.value.isoformat() if day is not None else None
+        # The reflection targets a specific business day: the 00:15 run on the
+        # 13th digests documents imported on the 12th. Clock and local-today
+        # are only fallbacks for callers without an explicit target day.
+        if self._day_override is not None:
+            day_text = self._day_override
+        else:
+            day = self._clock.today() if self._clock is not None else None
+            day_text = day.value.isoformat() if day is not None else None
         if day_text is None:
-            # Local calendar date, matching how ingest stamps imported_on.
             from datetime import datetime
 
             day_text = datetime.now().date().isoformat()
