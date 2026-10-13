@@ -122,7 +122,7 @@
 
 遗留（M4 验收未完项）：
 
-- **连续 3 天自动运行**：Day 1（2026-10-12）已真实记录（上表）。Day 2/3 需真实日历日：后续每天启动 `tinysoul start --root my-pkm`（reflection.schedule daily_time=00:15 自动触发）或手动 SDK ReflectionRequest，产出 `cards/2026-10-13.md`、`cards/2026-10-14.md` 后回填本文件。**不伪造运行记录。**
+- **连续 3 天自动运行**：Day 1（2026-10-12）已真实记录。**Day 2 补录（2026-10-13）**：发现并修复两个问题——(1) 00:15 定时反思触发时后端进程已崩溃（ConnectionResetError），反思从未运行；(2) 执行器日目标 bug：00:15 的反思针对前一日，但执行器扫描"今天"的导入导致空扫。修复后手动补跑 target_day=2026-10-12 的 Memory Reflection，真实生成新卡片（2026-10-12.md 现共 4 张，来源引用全部指向活文档）。**教训：定时卡片要求后端在 00:15 存活；进程稳定性成为 M4 验收的实际前置。** Day 3（10-14）继续。
 - 反思轮偶发 `action.internal_failure` 收尾（flash 在 core.answer 里传 km: refs 被 core 解析器拒绝后循环至预算耗尽；core 的 reference_resolvers 硬编码只有 workspace，km 引用无法进入 core.answer 的 references 参数——属上游扩展点限制，已记入待办：flash 质量问题+上游扩展点，不影响卡片生成主链路）。
 - glm-4.5-flash 驱动反思轮的稳定性有限（同一指令时而调用时而忽略 km.generate_card）；换更强模型即改善（等待有余额凭据）。
 
