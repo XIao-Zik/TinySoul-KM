@@ -40,7 +40,7 @@ def test_write_cards_creates_daily_document_with_real_links(
     }
     card_ref = engine_with_notes.write_cards(
         "2026-10-12", (card,), source_titles={entry.km_id: entry.title}
-    )
+    ).ref
     assert card_ref.startswith("km:")
     stored = engine_with_notes.store.read_document("2026-10-12.md", source="card")
     assert "km_source: card" in stored
@@ -76,6 +76,40 @@ def test_write_cards_appends_same_day(engine_with_notes: KnowledgeEngine) -> Non
 def test_write_cards_requires_cards(engine_with_notes: KnowledgeEngine) -> None:
     with pytest.raises(Exception, match="at least one card"):
         engine_with_notes.write_cards("2026-10-12", ())
+
+
+def test_write_cards_deduplicates_repeated_reflection_runs(
+    engine_with_notes: KnowledgeEngine,
+) -> None:
+    entry = engine_with_notes.index.live()[0]
+    ref = engine_with_notes.ref_for(entry.km_id)
+    card = {
+        "question": "Q1?",
+        "answer": "A1",
+        "concept_tags": ["t"],
+        "source_refs": [ref],
+        "confidence": "high",
+    }
+    first = engine_with_notes.write_cards("2026-10-12", (card,))
+    assert first.written == 1 and first.duplicates == 0
+
+    # reflection cycles re-run the same day: identical (question, refs) are
+    # skipped instead of appended, even when other fields drift slightly
+    drifted = dict(card, concept_tags=["t", "extra"], answer="A1 扩写")
+    repeat = engine_with_notes.write_cards("2026-10-12", (card, drifted))
+    assert repeat.written == 0 and repeat.duplicates == 2
+
+    stored = engine_with_notes.store.read_document("2026-10-12.md", source="card")
+    assert stored.count("## 卡片") == 1
+    assert "extra" not in stored
+
+    # a genuinely new card still appends alongside the existing one
+    new_card = dict(card, question="Q2?", answer="A2")
+    third = engine_with_notes.write_cards("2026-10-12", (new_card,))
+    assert third.written == 1
+    stored = engine_with_notes.store.read_document("2026-10-12.md", source="card")
+    assert stored.count("## 卡片") == 2
+    assert engine_with_notes.index.get("2026-10-12.md").km_id == first.ref.partition(":")[2]
 
 
 def test_documents_imported_on_filters_by_day(

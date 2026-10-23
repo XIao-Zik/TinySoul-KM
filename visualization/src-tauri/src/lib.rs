@@ -228,6 +228,7 @@ fn km_document(project_root: String, km_id: String) -> Result<KmDocument, String
     let base = match entry.source.as_str() {
         "chat" => "chats",
         "card" => "cards",
+        "workspace" => "workspace",
         _ => "notes",
     };
     let full = km_root(&project_root)?.join(base).join(path);
@@ -574,6 +575,370 @@ fn km_cards(project_root: String) -> Result<Vec<KmCardEntry>, String> {
     Ok(cards)
 }
 
+// -- card curation: user-side delete/edit of reflection-generated cards ------
+//
+// Cards live one day-file with one `## 卡片` section each. Curation rewrites
+// that file and bumps the derived index entry (checksum/size/mtime/links) so
+// the desktop views stay consistent. The running backend's in-memory index
+// refreshes on its next own mutation or restart.
+
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedCard {
+    question: String,
+    answer: String,
+    tags: Vec<String>,
+    refs: Vec<String>,
+    confidence: String,
+}
+
+fn card_identity(question: &str, refs: &[String]) -> String {
+    let mut sorted: Vec<&String> = refs.iter().collect();
+    sorted.sort();
+    format!(
+        "{}\u{1f}{}",
+        question.trim(),
+        sorted
+            .iter()
+            .map(|r| r.trim().trim_start_matches("km:").to_string())
+            .collect::<Vec<_>>()
+            .join("\u{1f}")
+    )
+}
+
+/// Split a card document into its verbatim frontmatter block and parsed
+/// sections. The frontmatter block includes both `---` fences.
+fn parse_card_document(markdown: &str) -> (String, Vec<ParsedCard>) {
+    let mut lines = markdown.lines().peekable();
+    let mut frontmatter = String::new();
+    if lines.peek().map(|l| l.trim_end() == "---").unwrap_or(false) {
+        frontmatter.push_str("---\n");
+        lines.next();
+        for line in lines.by_ref() {
+            frontmatter.push_str(line);
+            frontmatter.push('\n');
+            if line.trim_end() == "---" {
+                break;
+            }
+        }
+    }
+    let mut cards: Vec<ParsedCard> = Vec::new();
+    let mut current: Option<ParsedCard> = None;
+    let mut answer_lines: Vec<String> = Vec::new();
+    let mut in_answer = false;
+    let mut flush = |current: &mut Option<ParsedCard>, answer_lines: &mut Vec<String>| {
+        if let Some(card) = current {
+            card.answer = answer_lines.join("\n");
+            cards.push(card.clone());
+        }
+        answer_lines.clear();
+    };
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "## 卡片" {
+            flush(&mut current, &mut answer_lines);
+            in_answer = false;
+            current = Some(ParsedCard {
+                question: String::new(),
+                answer: String::new(),
+                tags: Vec::new(),
+                refs: Vec::new(),
+                confidence: String::new(),
+            });
+            continue;
+        }
+        let Some(card) = current.as_mut() else {
+            continue;
+        };
+        if let Some(rest) = trimmed.strip_prefix("**Q:") {
+            card.question = rest.trim().trim_end_matches("**").trim().to_string();
+            in_answer = true;
+        } else if let Some(rest) = trimmed.strip_prefix("- 标签:") {
+            in_answer = false;
+            card.tags = rest
+                .split(',')
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+                .collect();
+        } else if let Some(rest) = trimmed.strip_prefix("- 来源:") {
+            in_answer = false;
+            for reference in rest.split(',') {
+                let id = reference.trim().trim_start_matches("km:").to_string();
+                if !id.is_empty() {
+                    card.refs.push(id);
+                }
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("- 置信度:") {
+            in_answer = false;
+            card.confidence = rest.trim().to_string();
+        } else if in_answer && !trimmed.is_empty() {
+            answer_lines.push(trimmed.to_string());
+        }
+    }
+    flush(&mut current, &mut answer_lines);
+    (frontmatter, cards)
+}
+
+/// Canonical section body, byte-compatible with the Python writer's format.
+fn render_card_section(card: &ParsedCard) -> String {
+    let refs = card
+        .refs
+        .iter()
+        .map(|id| format!("km:{id}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    [
+        "## 卡片".to_string(),
+        String::new(),
+        format!("**Q: {}**", card.question),
+        String::new(),
+        card.answer.clone(),
+        String::new(),
+        format!("- 标签: {}", card.tags.join(", ")),
+        format!("- 来源: {refs}"),
+        format!("- 置信度: {}", card.confidence),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+fn render_card_document(frontmatter: &str, cards: &[ParsedCard]) -> String {
+    let body = cards
+        .iter()
+        .map(render_card_section)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if body.is_empty() {
+        format!("{frontmatter}\n")
+    } else {
+        format!("{frontmatter}\n\n{body}")
+    }
+}
+
+/// Minimal YAML scalar emission mirroring what Python's safe_dump produces
+/// for card link titles: plain when unambiguous, single-quoted otherwise.
+fn yaml_scalar(value: &str) -> String {
+    let needs_quotes = value.is_empty()
+        || value.contains(": ")
+        || value.contains(" #")
+        || value.ends_with(':')
+        || value.trim() != value
+        || value.starts_with(['&', '*', '!', '|', '>', '\'', '"', '%', '@', '`', '[', ']', '{', '}', '#', '-', '?', ',']);
+    if needs_quotes {
+        format!("'{}'", value.replace('\'', "''"))
+    } else {
+        value.to_string()
+    }
+}
+
+/// Rewrite the frontmatter's `km_links` list in place, preserving every other
+/// line verbatim (annotations and future keys survive curation untouched).
+fn replace_km_links(frontmatter: &str, links: &[String]) -> String {
+    let block: Vec<String> = if links.is_empty() {
+        vec!["km_links: []".to_string()]
+    } else {
+        let mut block = vec!["km_links:".to_string()];
+        block.extend(links.iter().map(|title| format!("- {}", yaml_scalar(title))));
+        block
+    };
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let mut output: Vec<String> = Vec::with_capacity(lines.len() + block.len());
+    let mut replaced = false;
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.starts_with("km_links:") && !replaced {
+            output.extend(block.iter().cloned());
+            replaced = true;
+            index += 1;
+            while index < lines.len() && lines[index].trim_start().starts_with("- ") {
+                index += 1;
+            }
+            continue;
+        }
+        output.push(line.to_string());
+        index += 1;
+    }
+    if !replaced && !links.is_empty() {
+        // Insert before the closing fence; an empty list needs no key at all.
+        let fence = output.iter().rposition(|line| line.trim_end() == "---");
+        if let Some(position) = fence {
+            let tail = output.split_off(position);
+            output.extend(block.iter().cloned());
+            output.extend(tail);
+        }
+    }
+    let mut result = output.join("\n");
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+/// Canonical content checksum, mirroring the Python store's definition so the
+/// bumped index entry stays byte-compatible with what the backend recomputes.
+fn card_checksum(text: &str) -> String {
+    let normalized = text
+        .trim_start_matches('\u{feff}')
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let digest = Sha256::digest(normalized.as_bytes());
+    format!("sha256:{:x}", digest)
+}
+
+/// Rewrite the day file's derived index entry after curation.
+fn bump_card_index(
+    project_root: &str,
+    day: &str,
+    text: &str,
+    links: Option<Vec<String>>,
+) -> Result<(), String> {
+    let index_path = km_root(project_root)?
+        .join(".tinysoul_knowledge")
+        .join("index.json");
+    let raw = fs::read_to_string(&index_path)
+        .map_err(|e| format!("Cannot read knowledge index: {e}"))?;
+    let mut value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("Knowledge index is invalid: {e}"))?;
+    let Some(entry) = value
+        .get_mut("entries")
+        .and_then(|entries| entries.get_mut(format!("{day}.md")))
+        .and_then(|entry| entry.as_object_mut())
+    else {
+        return Ok(()); // entry absent: nothing derived to refresh
+    };
+    entry.insert("checksum".to_string(), serde_json::Value::String(card_checksum(text)));
+    entry.insert("size".to_string(), serde_json::Value::Number(serde_json::Number::from(text.chars().count())));
+    let mtime = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    entry.insert("mtime".to_string(), serde_json::json!(mtime));
+    if let Some(links) = links {
+        entry.insert("links".to_string(), serde_json::json!(links));
+    }
+    let serialized = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("Knowledge index is invalid: {e}"))?;
+    atomic_write(&index_path, &serialized)
+}
+
+fn atomic_write(path: &Path, text: &str) -> Result<(), String> {
+    let temp = path.with_extension("tmp-curation");
+    fs::write(&temp, text).map_err(|e| format!("Cannot write {}: {e}", temp.display()))?;
+    fs::rename(&temp, path).map_err(|e| format!("Cannot replace {}: {e}", path.display()))
+}
+
+fn card_file_path(project_root: &str, day: &str) -> Result<PathBuf, String> {
+    if day.is_empty()
+        || !day.chars().all(|c| c.is_ascii_digit() || c == '-')
+        || !day.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+    {
+        return Err(format!("Invalid card day: {day}"));
+    }
+    Ok(km_root(project_root)?.join("cards").join(format!("{day}.md")))
+}
+
+fn load_card_document(
+    project_root: &str,
+    day: &str,
+) -> Result<(PathBuf, String, String, Vec<ParsedCard>), String> {
+    let path = card_file_path(project_root, day)?;
+    let markdown = fs::read_to_string(&path)
+        .map_err(|e| format!("Cannot read card document {day}: {e}"))?;
+    let (frontmatter, cards) = parse_card_document(&markdown);
+    Ok((path, markdown, frontmatter, cards))
+}
+
+fn find_card_index<'a>(
+    cards: &'a [ParsedCard],
+    question: &str,
+    source_ids: &[String],
+) -> Option<usize> {
+    let identity = card_identity(question, source_ids);
+    cards
+        .iter()
+        .position(|card| card_identity(&card.question, &card.refs) == identity)
+}
+
+/// Resolve the union of source titles for the remaining cards, in first-seen
+/// order; unresolvable ids fall back to the raw id (same as km_cards).
+fn remaining_link_titles(
+    project_root: &str,
+    cards: &[ParsedCard],
+) -> Result<Vec<String>, String> {
+    let entries = km_live_entries(project_root)?;
+    let by_id: std::collections::HashMap<&str, &KmIndexEntry> = entries
+        .iter()
+        .map(|(_, e)| (e.km_id.as_str(), e))
+        .collect();
+    let mut titles: Vec<String> = Vec::new();
+    for card in cards {
+        for id in &card.refs {
+            let title = match by_id.get(id.as_str()) {
+                Some(entry) if !entry.title.is_empty() => entry.title.clone(),
+                _ => id.clone(),
+            };
+            if !titles.contains(&title) {
+                titles.push(title);
+            }
+        }
+    }
+    Ok(titles)
+}
+
+#[tauri::command]
+fn km_card_delete(
+    project_root: String,
+    day: String,
+    question: String,
+    source_ids: Vec<String>,
+) -> Result<(), String> {
+    let (path, _markdown, frontmatter, cards) = load_card_document(&project_root, &day)?;
+    let position = find_card_index(&cards, &question, &source_ids)
+        .ok_or_else(|| format!("Card not found in {day}: {question}"))?;
+    let mut remaining = cards.clone();
+    remaining.remove(position);
+    let links = remaining_link_titles(&project_root, &remaining)?;
+    let updated_frontmatter = replace_km_links(&frontmatter, &links);
+    let text = render_card_document(&updated_frontmatter, &remaining);
+    atomic_write(&path, &text)?;
+    bump_card_index(&project_root, &day, &text, Some(links))
+}
+
+#[tauri::command]
+fn km_card_update(
+    project_root: String,
+    day: String,
+    question: String,
+    source_ids: Vec<String>,
+    new_question: String,
+    new_answer: String,
+    new_tags: Vec<String>,
+    new_confidence: String,
+) -> Result<(), String> {
+    if new_question.trim().is_empty() {
+        return Err("Card question cannot be empty".to_string());
+    }
+    let (path, _markdown, frontmatter, cards) = load_card_document(&project_root, &day)?;
+    let position = find_card_index(&cards, &question, &source_ids)
+        .ok_or_else(|| format!("Card not found in {day}: {question}"))?;
+    let mut remaining = cards.clone();
+    remaining[position].question = new_question.trim().to_string();
+    remaining[position].answer = new_answer.replace("\r\n", "\n").trim().to_string();
+    remaining[position].tags = new_tags
+        .iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    remaining[position].confidence = if new_confidence.trim().is_empty() {
+        "medium".to_string()
+    } else {
+        new_confidence.trim().to_string()
+    };
+    let text = render_card_document(&frontmatter, &remaining);
+    atomic_write(&path, &text)?;
+    bump_card_index(&project_root, &day, &text, None)
+}
+
 #[derive(Deserialize, Debug)]
 struct KmIndexEntry {
     #[serde(default)]
@@ -770,8 +1135,109 @@ pub fn run() {
             km_find_docs,
             km_neighborhood,
             km_document,
+            km_card_delete,
+            km_card_update,
             km_ingest
         ])
         .run(tauri::generate_context!())
         .expect("error while running TinySoul visualization");
+}
+
+#[cfg(test)]
+mod card_curation_tests {
+    use super::*;
+
+    fn sample_markdown() -> String {
+        let frontmatter = "---\nkm_source: card\nkm_id: card-41c9e73cb1c5\nkm_card_date: '2026-10-12'\nkm_imported: '2026-10-11T19:44:52+00:00'\nkm_links:\n- 混合检索设计讨论\n- 如何让大模型为你所用\n---\n\n";
+        let card_a = ParsedCard {
+            question: "混合检索怎么设计？".to_string(),
+            answer: "词法+向量双路。".to_string(),
+            tags: vec!["RRF".to_string()],
+            refs: vec!["c-5e674ee0f0d3".to_string()],
+            confidence: "high".to_string(),
+        };
+        let card_b = ParsedCard {
+            question: "如何避免上下文腐化？".to_string(),
+            answer: "控制注入量。".to_string(),
+            tags: vec!["context".to_string()],
+            refs: vec!["k-a118b1d747bc".to_string()],
+            confidence: "medium".to_string(),
+        };
+        format!("{frontmatter}{}", render_card_document("---\nkm_source: card\nkm_id: card-41c9e73cb1c5\nkm_card_date: '2026-10-12'\nkm_imported: '2026-10-11T19:44:52+00:00'\nkm_links:\n- 混合检索设计讨论\n- 如何让大模型为你所用\n---", &[card_a, card_b]))
+    }
+
+    #[test]
+    fn parse_round_trips_canonical_sections() {
+        let markdown = sample_markdown();
+        let (frontmatter, cards) = parse_card_document(&markdown);
+        assert!(frontmatter.starts_with("---\nkm_source: card"));
+        assert!(frontmatter.trim_end().ends_with("---"));
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].question, "混合检索怎么设计？");
+        assert_eq!(cards[0].refs, vec!["c-5e674ee0f0d3"]);
+        assert_eq!(cards[0].answer, "词法+向量双路。");
+        assert_eq!(cards[1].confidence, "medium");
+        // re-rendering the parsed cards reproduces the canonical body
+        assert!(render_card_document(&frontmatter, &cards).contains("**Q: 混合检索怎么设计？**"));
+    }
+
+    #[test]
+    fn identity_ignores_ref_order_and_prefix() {
+        let a = card_identity("Q", &["km:b".to_string(), "km:a".to_string()]);
+        let b = card_identity(" Q ", &["a".to_string(), "b".to_string()]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn delete_recomputes_km_links_from_remaining_cards() {
+        let markdown = sample_markdown();
+        let (frontmatter, cards) = parse_card_document(&markdown);
+        let remaining: Vec<ParsedCard> = cards[1..].to_vec();
+        let links = remaining_link_titles_without_index(&remaining);
+        let updated = replace_km_links(&frontmatter, &links);
+        assert!(updated.contains("km_links:\n- k-a118b1d747bc"));
+        assert!(!updated.contains("混合检索设计讨论"));
+        // other frontmatter lines survive verbatim
+        assert!(updated.contains("km_imported: '2026-10-11T19:44:52+00:00'"));
+    }
+
+    #[test]
+    fn replace_km_links_handles_missing_and_empty() {
+        let without = "---\nkm_source: card\nkm_id: x\n---\n";
+        assert_eq!(replace_km_links(without, &[]), without.to_string());
+        let added = replace_km_links(without, &["T".to_string()]);
+        assert!(added.contains("km_links:\n- T"));
+        let emptied = replace_km_links(&sample_markdown(), &[]);
+        assert!(emptied.contains("km_links: []"));
+    }
+
+    #[test]
+    fn yaml_scalar_quotes_ambiguous_values() {
+        assert_eq!(yaml_scalar("简单标题"), "简单标题");
+        assert_eq!(yaml_scalar("a: b"), "'a: b'");
+        assert_eq!(yaml_scalar("it's"), "it's");
+        assert_eq!(yaml_scalar("'leading"), "'''leading'");
+        assert_eq!(yaml_scalar(" padded "), "' padded '");
+    }
+
+    #[test]
+    fn checksum_matches_python_store_definition() {
+        assert_eq!(
+            card_checksum("a\r\nb\n"),
+            "sha256:911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2"
+        );
+    }
+
+    /// Link-title resolution without a store on disk (test double).
+    fn remaining_link_titles_without_index(cards: &[ParsedCard]) -> Vec<String> {
+        let mut titles: Vec<String> = Vec::new();
+        for card in cards {
+            for id in &card.refs {
+                if !titles.contains(id) {
+                    titles.push(id.clone());
+                }
+            }
+        }
+        titles
+    }
 }

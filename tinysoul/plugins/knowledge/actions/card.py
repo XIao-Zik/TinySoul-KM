@@ -28,13 +28,18 @@ from ..services import KnowledgeReadService
 
 MAX_DAILY_CANDIDATES = 12
 CARD_SCHEMA_KEYS = {"question", "answer", "concept_tags", "source_refs", "confidence"}
+ANNOTATION_KEYS = {"ref", "km_type", "km_topics", "km_summary"}
 PROMPT_GUIDE = """You are generating daily knowledge cards for a personal knowledge base.
 From the supplied candidate documents (imported or changed today), distill 1 to 5 cards.
 Each card: {"question": "what problem does this concept solve?", "answer": "3-5 sentences with the key conclusion",
 "concept_tags": ["..."], "source_refs": ["km:<id>", ...], "confidence": "high|medium|low"}.
-Rules: answer in the source document's language; every source_ref MUST be copied verbatim from the
-candidate refs listed in the input; never invent a ref; low-confidence cards are better omitted;
-return JSON {"cards": [...]} only."""
+Additionally output "annotations": one entry per candidate document you can confidently
+classify: {"ref": "km:<id>", "km_type": "concept|procedure|fact|reference|note",
+"km_topics": ["..."], "km_summary": "one-sentence summary of what the document is about"}.
+Rules: answer in the source document's language; every source_ref and annotation ref MUST be
+copied verbatim from the candidate refs listed in the input; never invent a ref; low-confidence
+cards are better omitted; omit "annotations" entirely when nothing can be classified
+confidently; return JSON {"cards": [...], "annotations": [...]} only."""
 
 
 def register_knowledge_card_action(
@@ -131,12 +136,19 @@ class KnowledgeCardExecutor(ActionExecutor):
 
             day_text = datetime.now().date().isoformat()
         try:
+            # Workspace archive ingestion runs before candidate selection so
+            # files archived at the day boundary become same-day candidates
+            # (idempotent fallback, decoupled from archive timing); expired
+            # already-ingested archives are pruned right after (D-2).
+            workspace_report = self._engine.ingest_workspace_archive()
+            self._engine.cleanup_expired_archives()
             candidates = self._engine.documents_imported_on(day_text)
             if not candidates:
                 payload = {
                     "cards_written": 0,
                     "day": day_text,
                     "skipped": "no new documents",
+                    "workspace_ingest": workspace_report.summary(),
                 }
                 # The catalog declares a foldable result: every success must
                 # carry a trace projection.
@@ -234,17 +246,23 @@ class KnowledgeCardExecutor(ActionExecutor):
                         origin_refs=(), canonical_payload=payload
                     ),
                 )
-            ref = self._engine.write_cards(day_text, tuple(validated), source_titles=titles)
+            write_report = self._engine.write_cards(
+                day_text, tuple(validated), source_titles=titles
+            )
+            annotated = self._apply_annotations(value, live_ids)
             payload = {
-                "cards_written": len(validated),
+                "cards_written": write_report.written,
+                "duplicates_skipped": write_report.duplicates,
                 "day": day_text,
-                "card_ref": ref,
+                "card_ref": write_report.ref,
+                "annotated": annotated,
+                "workspace_ingest": workspace_report.summary(),
             }
             return _success(
                 execution,
                 payload,
                 trace=ActionTraceProjection(
-                    origin_refs=(ref,), canonical_payload=payload
+                    origin_refs=(write_report.ref,), canonical_payload=payload
                 ),
             )
         except Exception as exc:
@@ -255,6 +273,53 @@ class KnowledgeCardExecutor(ActionExecutor):
             detail = "".join(traceback.format_exception(exc))[-3500:]
             feedback = f"{type(exc).__name__}: {exc}\n{detail}"
             return _failed(execution, feedback, "internal_error")
+
+    def _apply_annotations(self, value: object, live_ids: set[str]) -> int:
+        """D-1 write-back: per-document km_type/km_topics/km_summary.
+
+        Best effort by design — an invalid or failing annotation is skipped,
+        never fails the turn; unannotated documents may be picked up again by
+        a later reflection.
+        """
+
+        if not isinstance(value, dict):
+            return 0
+        raw_annotations = value.get("annotations")
+        if not isinstance(raw_annotations, list):
+            return 0
+        annotated = 0
+        for raw in raw_annotations:
+            if not isinstance(raw, dict) or not ANNOTATION_KEYS.issuperset(raw):
+                continue
+            ref = raw.get("ref")
+            if not isinstance(ref, str) or not ref.startswith("km:"):
+                continue
+            km_id = ref.partition(":")[2]
+            if km_id not in live_ids:
+                continue
+            km_type = raw.get("km_type")
+            topics = raw.get("km_topics")
+            summary = raw.get("km_summary")
+            if (
+                not isinstance(km_type, str)
+                or not km_type.strip()
+                or not isinstance(summary, str)
+                or not summary.strip()
+                or not isinstance(topics, list)
+                or any(
+                    not isinstance(topic, str) or not topic.strip()
+                    for topic in topics
+                )
+            ):
+                continue
+            if self._engine.annotate_document(
+                km_id,
+                km_type=km_type.strip(),
+                km_topics=tuple(topic.strip() for topic in topics),
+                km_summary=summary.strip(),
+            ):
+                annotated += 1
+        return annotated
 
 
 def _success(

@@ -9,7 +9,7 @@ from typing import cast
 
 from tinysoul.infra.config import ConfigError, reject_unknown_keys
 
-_KNOWN_KEYS = frozenset({"root", "inspect", "search", "reflection"})
+_KNOWN_KEYS = frozenset({"root", "inspect", "search", "reflection", "archive"})
 
 
 @dataclass(frozen=True)
@@ -48,12 +48,40 @@ class KnowledgeReflectionSettings:
 
 
 @dataclass(frozen=True)
+class KnowledgeArchiveSettings:
+    """Workspace archive ingestion: where daily archives live and when to prune."""
+
+    archive_root: Path = Path("archive")
+    retention_days: int = 30
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.archive_root, Path):
+            raise ConfigError(
+                "Knowledge archive root must be a path",
+                key="knowledge.archive.archive_root",
+            )
+        if (
+            isinstance(self.retention_days, bool)
+            or not isinstance(self.retention_days, int)
+            or self.retention_days < 0
+        ):
+            raise ConfigError(
+                "Knowledge archive retention_days must be zero or a positive integer "
+                "(0 disables cleanup)",
+                key="knowledge.archive.retention_days",
+            )
+
+
+@dataclass(frozen=True)
 class KnowledgeSettings:
     root: Path
     inspect: KnowledgeInspectSettings = field(default_factory=KnowledgeInspectSettings)
     search: KnowledgeSearchSettings = field(default_factory=KnowledgeSearchSettings)
     reflection: KnowledgeReflectionSettings = field(
         default_factory=KnowledgeReflectionSettings
+    )
+    archive: KnowledgeArchiveSettings = field(
+        default_factory=KnowledgeArchiveSettings
     )
 
     def __post_init__(self) -> None:
@@ -71,6 +99,10 @@ class KnowledgeSettings:
             raise ConfigError(
                 "Knowledge reflection settings are invalid", key="knowledge.reflection"
             )
+        if not isinstance(self.archive, KnowledgeArchiveSettings):
+            raise ConfigError(
+                "Knowledge archive settings are invalid", key="knowledge.archive"
+            )
 
 
 def parse_knowledge_settings(
@@ -84,6 +116,7 @@ def parse_knowledge_settings(
         inspect=_parse_inspect(tree.get("inspect")),
         search=_parse_search(tree.get("search")),
         reflection=_parse_reflection(tree.get("reflection")),
+        archive=_parse_archive(tree.get("archive"), project_root=project_root),
     )
 
 
@@ -145,6 +178,45 @@ def _parse_reflection(value: object) -> KnowledgeReflectionSettings:
         daily_card_limit=_int(
             tree, "daily_card_limit", 5, "knowledge.reflection"
         ),
+    )
+
+
+def _parse_archive(
+    value: object, *, project_root: Path
+) -> KnowledgeArchiveSettings:
+    tree = _table(value, "knowledge.archive")
+    reject_unknown_keys(
+        tree,
+        {"archive_root", "retention_days"},
+        key="knowledge.archive",
+    )
+    defaults = KnowledgeArchiveSettings()
+    root_value = tree.get("archive_root", defaults.archive_root)
+    if isinstance(root_value, Path):
+        archive_root = root_value
+    else:
+        if not isinstance(root_value, str) or not root_value:
+            raise ConfigError(
+                "Knowledge archive root must be a non-empty path string",
+                key="knowledge.archive.archive_root",
+            )
+        archive_root = Path(root_value)
+        if not archive_root.is_absolute():
+            archive_root = project_root / archive_root
+    retention = tree.get("retention_days", defaults.retention_days)
+    if (
+        isinstance(retention, bool)
+        or not isinstance(retention, int)
+        or retention < 0
+    ):
+        raise ConfigError(
+            "Knowledge archive retention_days must be zero or a positive integer "
+            "(0 disables cleanup)",
+            key="knowledge.archive.retention_days",
+        )
+    return KnowledgeArchiveSettings(
+        archive_root=archive_root,
+        retention_days=retention,
     )
 
 

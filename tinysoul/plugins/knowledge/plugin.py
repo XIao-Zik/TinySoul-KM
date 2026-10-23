@@ -57,7 +57,7 @@ class KnowledgePlugin:
             "km.search",
             KM_SEARCH_SOURCES,
             KM_SEARCH_OPERATIONS,
-            scopes=("all", "obsidian", "chat", "card"),
+            scopes=("all", "obsidian", "chat", "card", "workspace"),
             filters=KNOWLEDGE_SEARCH_FILTERS,
             document_query=True,
         ),

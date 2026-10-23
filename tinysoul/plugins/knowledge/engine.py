@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from hashlib import sha256
+import os
 import time
 
 import yaml
@@ -30,7 +31,9 @@ from .ingest.obsidian import (
     index_entry_for,
     normalize_text,
     note_title,
+    parse_frontmatter,
     parse_note,
+    split_frontmatter,
     walk_vault,
 )
 from .storage.index import KnowledgeIndex, KnowledgeIndexEntry
@@ -65,6 +68,16 @@ class IngestReport:
             f"tombstoned={len(self.tombstoned)} unchanged={self.unchanged} "
             f"failed={len(self.failures)}"
         )
+
+
+@dataclass(frozen=True)
+class CardWriteReport:
+    """Outcome of one daily card write: reflection cycles re-call the action,
+    so already-present (question, source_refs) pairs are skipped, not appended."""
+
+    ref: str
+    written: int
+    duplicates: int
 
 
 class KnowledgeEngine:
@@ -127,6 +140,15 @@ class KnowledgeEngine:
     @property
     def index(self) -> KnowledgeIndex:
         return self._index
+
+    @property
+    def archive_root(self) -> Path:
+        """Daily archive root; a relative setting hangs off the project root."""
+
+        configured = self._settings.archive.archive_root
+        if configured.is_absolute():
+            return configured
+        return self._settings.root.parent / configured
 
     def ingest_obsidian(
         self,
@@ -391,6 +413,236 @@ class KnowledgeEngine:
         slug = chat_slug(session.title)
         return f"{day:%Y-%m}/{session.platform}/{slug}.md"
 
+    def ingest_workspace_archive(self) -> IngestReport:
+        """Ingest archived workspace Markdown into the knowledge store.
+
+        Scans ``<archive_root>/<archive>/workspace/**/*.md``. The archive day
+        is the archived BUSINESS day — ``transition.json``'s ``from_day``
+        when present, else the leading 8 digits of the directory name; when
+        neither is parsable the run falls back to today with a warning. Store
+        path: ``workspace/<archive day>/<original relative path>`` with
+        ``km_source=workspace`` and ``imported_on=<archive day>`` so the
+        target day's reflection treats archived files as same-day candidates.
+        Idempotent: a store entry whose checksum still matches the archive
+        content is skipped without writing.
+        """
+
+        archive_root = self.archive_root
+        added: list[str] = []
+        updated: list[str] = []
+        unchanged = 0
+        failures: list[tuple[str, str]] = []
+        changed = False
+        if archive_root.is_dir():
+            now = datetime.now(timezone.utc)
+            for archive_dir in sorted(archive_root.iterdir()):
+                if not archive_dir.is_dir() or archive_dir.name.startswith("."):
+                    continue
+                day = self._archive_day(archive_dir)
+                if day is None:
+                    day = now.date()
+                    failures.append(
+                        (
+                            archive_dir.name,
+                            "warning: archive day is unparsable; "
+                            "ingesting under today",
+                        )
+                    )
+                workspace_dir = archive_dir / "workspace"
+                if not workspace_dir.is_dir():
+                    continue
+                try:
+                    files = walk_vault(workspace_dir)
+                except KnowledgeContractError as exc:
+                    failures.append((archive_dir.name, f"warning: {exc}"))
+                    continue
+                for item in files:
+                    store_relative = f"{day.isoformat()}/{item.relative_path}"
+                    try:
+                        raw = (workspace_dir / item.relative_path).read_text(
+                            encoding="utf-8"
+                        )
+                    except (OSError, UnicodeDecodeError) as exc:
+                        failures.append((store_relative, f"read failed: {exc}"))
+                        continue
+                    normalized = normalize_text(raw)
+                    checksum = content_checksum(normalized)
+                    existing = self._index.get(store_relative)
+                    if (
+                        existing is not None
+                        and not existing.tombstoned
+                        and existing.checksum == checksum
+                    ):
+                        unchanged += 1
+                        continue
+                    try:
+                        parsed = parse_note(normalized)
+                    except KnowledgeContractError as exc:
+                        failures.append((store_relative, f"parse failed: {exc}"))
+                        continue
+                    for warning in parsed.warnings:
+                        failures.append((store_relative, f"warning: {warning}"))
+                    km_id = self._resolve_km_id(store_relative, parsed, checksum)
+                    document = StoreDocument(
+                        relative_path=store_relative,
+                        km_id=km_id,
+                        checksum=checksum,
+                        title=note_title(parsed, item.relative_path),
+                        links=tuple(link.target for link in parsed.links),
+                        tags=parsed.tags,
+                        text=compose_note_document(
+                            parsed,
+                            km_id=km_id,
+                            checksum=checksum,
+                            source_path=(
+                                workspace_dir / item.relative_path
+                            ).resolve().as_posix(),
+                            imported_at=now,
+                            km_source="workspace",
+                        ),
+                    )
+                    try:
+                        self._store.write_workspace(store_relative, document.text)
+                    except (KnowledgeContractError, KnowledgeIOError) as exc:
+                        failures.append(
+                            (store_relative, f"store write failed: {exc}")
+                        )
+                        continue
+                    self._index.put(
+                        index_entry_for(
+                            document,
+                            source="workspace",
+                            mtime=item.mtime,
+                            size=item.size,
+                            imported_on=day.isoformat(),
+                        )
+                    )
+                    changed = True
+                    if existing is not None and not existing.tombstoned:
+                        updated.append(store_relative)
+                    else:
+                        added.append(store_relative)
+        if changed:
+            self._index.save()
+        return IngestReport(
+            source="workspace",
+            added=tuple(sorted(added)),
+            updated=tuple(sorted(updated)),
+            tombstoned=(),
+            unchanged=unchanged,
+            failures=tuple(failures),
+            dry_run=False,
+        )
+
+    def cleanup_expired_archives(self) -> dict[str, int]:
+        """Delete expired, already-ingested workspace files from daily archives.
+
+        Only the ``workspace/`` subtree of expired archive days is touched:
+        session and memory snapshots are never modified. A file whose checksum
+        is not live in the knowledge store was never ingested and is kept.
+        ``retention_days <= 0`` disables cleanup entirely. Empty directories
+        left behind inside ``workspace/`` are pruned; the archive directory
+        itself is removed only when nothing else remains in it.
+        """
+
+        counts = {"deleted": 0, "kept_uningested": 0}
+        retention = self._settings.archive.retention_days
+        if retention <= 0:
+            counts["disabled"] = 1
+            return counts
+        archive_root = self.archive_root
+        if not archive_root.is_dir():
+            return counts
+        today = datetime.now().date()
+        live_checksums = {entry.checksum for entry in self._index.live()}
+        for archive_dir in sorted(archive_root.iterdir()):
+            if not archive_dir.is_dir() or archive_dir.name.startswith("."):
+                continue
+            day = self._archive_day(archive_dir)
+            if day is None or (today - day).days <= retention:
+                continue
+            workspace_dir = archive_dir / "workspace"
+            if not workspace_dir.is_dir():
+                continue
+            try:
+                files = walk_vault(workspace_dir)
+            except KnowledgeContractError:
+                continue
+            removed_any = False
+            for item in files:
+                path = workspace_dir / item.relative_path
+                try:
+                    raw = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    counts["kept_uningested"] += 1
+                    continue
+                if content_checksum(normalize_text(raw)) not in live_checksums:
+                    counts["kept_uningested"] += 1
+                    continue
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                counts["deleted"] += 1
+                removed_any = True
+            if removed_any:
+                self._prune_empty_dirs(workspace_dir)
+                try:
+                    workspace_dir.rmdir()
+                except OSError:
+                    pass
+                # Succeeds only when session/memory snapshots are gone too;
+                # their presence keeps the archive directory alive.
+                try:
+                    archive_dir.rmdir()
+                except OSError:
+                    pass
+        return counts
+
+    @staticmethod
+    def _prune_empty_dirs(root: Path) -> None:
+        for current, _dirnames, _filenames in os.walk(root, topdown=False):
+            path = Path(current)
+            if path == root:
+                continue
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+    def _archive_day(self, archive_dir: Path) -> date | None:
+        """Business day whose workspace the archive directory holds.
+
+        ``transition.json``'s ``from_day`` is authoritative: the directory
+        name carries the transition-execution timestamp, which is the day
+        AFTER the archived business day for the 00:15 flow. The leading 8
+        digits of the directory name are the fallback for archives without a
+        parsable transition record.
+        """
+
+        import json
+
+        try:
+            raw = json.loads(
+                (archive_dir / "transition.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            raw = None
+        if isinstance(raw, dict):
+            from_day = raw.get("from_day")
+            if isinstance(from_day, str) and from_day:
+                try:
+                    return date.fromisoformat(from_day)
+                except ValueError:
+                    pass
+        head = archive_dir.name[:8]
+        if head.isdigit():
+            try:
+                return datetime.strptime(head, "%Y%m%d").date()
+            except ValueError:
+                return None
+        return None
+
     def stats(self) -> dict[str, int]:
         entries = self._index.all()
         return {
@@ -484,22 +736,92 @@ class KnowledgeEngine:
             return text[:max_chars] + "…"
         return text
 
+    def annotate_document(
+        self,
+        km_id: str,
+        *,
+        km_type: str,
+        km_topics: tuple[str, ...],
+        km_summary: str,
+    ) -> bool:
+        """Write reflection-time LLM annotations into a live document's frontmatter.
+
+        The store text changes but the index checksum does not: annotations are
+        derived metadata, so a later re-ingest of the unchanged source stays
+        idempotent and never drops them. Returns False for unknown references
+        and unreadable store documents; annotation is best effort (D-1).
+        """
+
+        entry = self._index.get_by_km_id(km_id)
+        if entry is None:
+            return False
+        try:
+            text = self._store.read_document(entry.path, source=entry.source)
+            raw, body = split_frontmatter(text)
+            frontmatter = parse_frontmatter(raw) if raw is not None else {}
+            frontmatter["km_type"] = km_type
+            frontmatter["km_topics"] = list(km_topics)
+            frontmatter["km_summary"] = km_summary
+            rendered = yaml.safe_dump(
+                frontmatter,
+                allow_unicode=True,
+                sort_keys=False,
+                default_flow_style=False,
+                width=10_000,
+            )
+            self._store.write_document(
+                entry.path, f"---\n{rendered}---\n{body}", source=entry.source
+            )
+        except (KnowledgeContractError, KnowledgeIOError):
+            return False
+        # Re-put the unchanged entry to bump the index version so cached
+        # corpus text (read from the store) refreshes.
+        self._index.put(entry)
+        self._index.save()
+        return True
+
     def write_cards(
         self,
         day: str,
         cards: tuple[dict[str, object], ...],
         *,
         source_titles: dict[str, str] | None = None,
-    ) -> str:
-        """Append validated knowledge cards to ``cards/<day>.md``; returns ref."""
+    ) -> CardWriteReport:
+        """Append validated knowledge cards to ``cards/<day>.md``.
+
+        The reflection turn may invoke card generation several times per turn
+        and re-runs across restarts; a card whose (question, source_refs) pair
+        is already present in the day's document is skipped instead of being
+        appended again. Returns the stable card ref plus write counts.
+        """
 
         if not cards:
             raise KnowledgeContractError("Card write requires at least one card")
         relative = f"{day}.md"
         titles = source_titles or {}
         card_km_id = "card-" + sha256(relative.encode("utf-8")).hexdigest()[:12]
-        sections: list[str] = []
+        existing_path = self.store.cards_root.joinpath(relative)
+        existing_text: str | None = None
+        if existing_path.is_file():
+            existing_text = self._store.read_document(relative, source="card")
+        seen = self._existing_card_keys(existing_text) if existing_text else set()
+        fresh: list[dict[str, object]] = []
+        duplicates = 0
         for card in cards:
+            key = self._card_key(card)
+            if key in seen:
+                duplicates += 1
+                continue
+            seen.add(key)
+            fresh.append(card)
+        existing_entry = self._index.get(relative)
+        if existing_entry is not None and existing_entry.km_id:
+            card_km_id = existing_entry.km_id
+        ref = self.ref_for(card_km_id)
+        if not fresh:
+            return CardWriteReport(ref=ref, written=0, duplicates=duplicates)
+        sections: list[str] = []
+        for card in fresh:
             refs = tuple(str(ref) for ref in card.get("source_refs", ()))
             lines = [
                 "## 卡片",
@@ -518,16 +840,14 @@ class KnowledgeEngine:
         links = tuple(
             dict.fromkeys(
                 title
-                for card in cards
+                for card in fresh
                 for ref in card.get("source_refs", ())
                 for title in (titles.get(str(ref).partition(":")[2], ""),)
                 if title
             )
         )
-        existing_path = self.store.cards_root.joinpath(relative)
-        if existing_path.is_file():
-            existing = self._store.read_document(relative, source="card")
-            text = existing.rstrip("\n") + "\n\n" + body
+        if existing_text is not None:
+            text = existing_text.rstrip("\n") + "\n\n" + body
         else:
             frontmatter: dict[str, object] = {
                 "km_source": "card",
@@ -544,9 +864,6 @@ class KnowledgeEngine:
                 + body
             )
         self._store.write_card(relative, text)
-        existing_entry = self._index.get(relative)
-        if existing_entry is not None:
-            card_km_id = existing_entry.km_id or card_km_id
         self._index.put(
             KnowledgeIndexEntry(
                 path=relative,
@@ -563,7 +880,32 @@ class KnowledgeEngine:
             )
         )
         self._index.save()
-        return self.ref_for(card_km_id)
+        return CardWriteReport(ref=ref, written=len(fresh), duplicates=duplicates)
+
+    @staticmethod
+    def _card_key(card: dict[str, object]) -> tuple[str, tuple[str, ...]]:
+        question = str(card.get("question", "")).strip()
+        refs = tuple(sorted(str(ref) for ref in card.get("source_refs", ())))
+        return question, refs
+
+    @staticmethod
+    def _existing_card_keys(text: str) -> set[tuple[str, tuple[str, ...]]]:
+        """(question, source_refs) pairs already stored in a card document."""
+
+        keys: set[tuple[str, tuple[str, ...]]] = set()
+        for section in text.split("## 卡片")[1:]:
+            question = ""
+            refs: list[str] = []
+            for line in section.splitlines():
+                stripped = line.strip()
+                if question == "" and stripped.startswith("**Q:") and stripped.endswith("**"):
+                    question = stripped[4:-2].strip()
+                elif stripped.startswith("- 来源:"):
+                    value = stripped.split(":", 1)[1]
+                    refs.extend(item.strip() for item in value.split(",") if item.strip())
+            if question:
+                keys.add((question, tuple(sorted(refs))))
+        return keys
 
     def _matches_target(self, entry: KnowledgeIndexEntry, key: str, stem: str) -> bool:
         if entry.path.casefold() == key or entry.path.removesuffix(".md").casefold() == key:

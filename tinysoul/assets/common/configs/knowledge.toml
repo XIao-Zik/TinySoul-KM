@@ -7,3 +7,10 @@ embedding_cache_max_chars = 16000000
 [knowledge.reflection]
 enabled = false
 daily_card_limit = 5
+
+# 工作区归档收编：跨天归档的 workspace Markdown 自动进入知识库
+# （km_source=workspace，imported_on=归档日），每日反思为其生成卡片与标注。
+# archive_root 缺省为项目根下的 archive/（与 reflection.archive_root 一致）；
+# retention_days 为「已收编」归档工作区文件的保留天数，0 = 禁用超期清理。
+[knowledge.archive]
+retention_days = 30

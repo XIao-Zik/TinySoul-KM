@@ -84,6 +84,7 @@ const SOURCE_COLORS: Record<string, string> = {
   obsidian: "#8b7cf6",
   chat: "#38bdf8",
   card: "#f59e0b",
+  workspace: "#22c55e",
 };
 
 export function KmPage() {
@@ -124,7 +125,7 @@ export function KmPage() {
 }
 
 const REFLECTION_INSTRUCTIONS =
-  "调用一次 km.generate_card 生成该日导入文档的知识卡片；随后用 memory.write_daily 完成当日 Memory。";
+  "调用一次 km.generate_card 生成该日导入文档的知识卡片；随后用 memory.write_daily 完成当日 Memory（markdown 正文不要一级标题、不要 frontmatter、不要自己写标题——系统会自动提供日期和标题，直接以 ## 小节开始）。";
 
 /**
  * Daily reflection review: the first thing shown when the app opens. The
@@ -134,6 +135,24 @@ const REFLECTION_INSTRUCTIONS =
  * app session; a failed auto-request degrades to a manual retry button.
  */
 const autoSubmitted = new Set<string>();
+
+/** Reflections run for minutes: re-poll availability on a schedule and only
+ * hand the day back to the manual button after the last poll still misses. */
+function settleAfterRequest(
+  load: () => void,
+  day: string,
+  clearRunning: (day: string) => void,
+) {
+  const delays = [10_000, 40_000, 90_000, 180_000, 300_000];
+  delays.forEach((delay, index) => {
+    setTimeout(() => {
+      load();
+      if (index === delays.length - 1) {
+        clearRunning(day);
+      }
+    }, delay);
+  });
+}
 
 function KmReflectionBanner() {
   const clients = useConnectionStore((s) => s.clients);
@@ -161,6 +180,8 @@ function KmReflectionBanner() {
   // capped at 3); re-check availability shortly after so the banner settles.
   useEffect(() => {
     if (missing === null || missing.length === 0 || clients === null) return;
+    const clearRunning = (day: string) =>
+      setRunning((prev) => prev.filter((d) => d !== day));
     for (const day of missing.slice(-3).reverse()) {
       if (autoSubmitted.has(day)) continue;
       autoSubmitted.add(day);
@@ -171,17 +192,14 @@ function KmReflectionBanner() {
           target_day: day,
           instructions: REFLECTION_INSTRUCTIONS,
         })
-        .then(() => {
-          setTimeout(load, 10000);
-          setTimeout(load, 40000);
-        })
+        .then(() => settleAfterRequest(load, day, clearRunning))
         .catch(() => {
           autoSubmitted.delete(day);
           setRunning((prev) => prev.filter((d) => d !== day));
           setFailed((prev) => [...prev, day]);
         });
     }
-  }, [missing, clients]);
+  }, [missing, clients, load]);
 
   if (!connected || missing === null || hidden) return null;
 
@@ -196,10 +214,11 @@ function KmReflectionBanner() {
         target_day: day,
         instructions: REFLECTION_INSTRUCTIONS,
       })
-      .then(() => {
-        setTimeout(load, 10000);
-        setTimeout(load, 40000);
-      })
+      .then(() =>
+        settleAfterRequest(load, day, (settled) =>
+          setRunning((prev) => prev.filter((d) => d !== settled)),
+        ),
+      )
       .catch(() => {
         autoSubmitted.delete(day);
         setRunning((prev) => prev.filter((d) => d !== day));
@@ -346,15 +365,42 @@ function KmCardsView({ onOpenDoc }: { onOpenDoc: (doc: KmDocHit) => void }) {
     [root],
   );
   const { data, error, loading, reload } = useKmData<KmCardEntry[]>(loader);
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [confirmingKey, setConfirmingKey] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   if (error) return <KmNotice text={error} onRetry={reload} />;
   if (loading || data === null) return <KmLoading />;
   if (data.length === 0)
     return <KmNotice text="还没有知识卡片——每日反思会自动生成。" onRetry={reload} />;
+
+  const cardKey = (card: KmCardEntry) => `${card.day}::${card.question}`;
+
+  const removeCard = async (card: KmCardEntry) => {
+    setBusy(true);
+    try {
+      await invoke("km_card_delete", {
+        projectRoot: root,
+        day: card.day,
+        question: card.question,
+        sourceIds: card.sources.map((source) => source.id),
+      });
+      setConfirmingKey(null);
+      reload();
+    } catch (e) {
+      setConfirmingKey(null);
+      alert(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="grid grid-cols-1 gap-4 p-6 lg:grid-cols-2 xl:grid-cols-3">
-      {data.map((card, index) => (
+      {data.map((card) => {
+        const key = cardKey(card);
+        return (
         <div
-          key={`${card.day}-${index}`}
+          key={key}
           className="flex flex-col gap-2 rounded-xl border border-line bg-bg-elev p-4 text-[13px] leading-relaxed"
         >
           <div className="flex items-center justify-between text-[11px] text-fg-dim">
@@ -413,8 +459,155 @@ function KmCardsView({ onOpenDoc }: { onOpenDoc: (doc: KmDocHit) => void }) {
               ))}
             </div>
           )}
+          <div className="flex items-center gap-2 border-t border-line pt-2 text-[11px]">
+            <button
+              className="rounded border border-line px-2 py-0.5 text-fg-dim transition-colors hover:border-accent hover:text-accent disabled:opacity-50"
+              disabled={busy}
+              onClick={() => {
+                setConfirmingKey(null);
+                setEditingKey(editingKey === key ? null : key);
+              }}
+            >
+              {editingKey === key ? "取消编辑" : "编辑"}
+            </button>
+            {confirmingKey === key ? (
+              <span className="flex items-center gap-1.5 text-danger">
+                删除后下次反思不会自动恢复，确认？
+                <button
+                  className="rounded border border-danger px-1.5 py-0.5 text-danger disabled:opacity-50"
+                  disabled={busy}
+                  onClick={() => removeCard(card)}
+                >
+                  确认删除
+                </button>
+                <button
+                  className="rounded border border-line px-1.5 py-0.5 text-fg-dim"
+                  onClick={() => setConfirmingKey(null)}
+                >
+                  取消
+                </button>
+              </span>
+            ) : (
+              <button
+                className="rounded border border-line px-2 py-0.5 text-fg-dim transition-colors hover:border-danger hover:text-danger disabled:opacity-50"
+                disabled={busy}
+                onClick={() => {
+                  setEditingKey(null);
+                  setConfirmingKey(key);
+                }}
+              >
+                删除
+              </button>
+            )}
+          </div>
+          {editingKey === key && (
+            <KmCardEditor
+              card={card}
+              projectRoot={root}
+              onDone={() => {
+                setEditingKey(null);
+                reload();
+              }}
+            />
+          )}
         </div>
-      ))}
+        );
+      })}
+    </div>
+  );
+}
+
+/** Inline editor for one curated card: rewrite question/answer/tags/confidence. */
+function KmCardEditor({
+  card,
+  projectRoot,
+  onDone,
+}: {
+  card: KmCardEntry;
+  projectRoot: string;
+  onDone: () => void;
+}) {
+  const [question, setQuestion] = useState(card.question);
+  const [answer, setAnswer] = useState(card.answer);
+  const [tags, setTags] = useState(card.tags.join(", "));
+  const [confidence, setConfidence] = useState(card.confidence);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await invoke("km_card_update", {
+        projectRoot,
+        day: card.day,
+        question: card.question,
+        sourceIds: card.sources.map((source) => source.id),
+        newQuestion: question,
+        newAnswer: answer,
+        newTags: tags
+          .split(/[,，]/)
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+        newConfidence: confidence,
+      });
+      onDone();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-line bg-bg p-3 text-[12px]">
+      <label className="flex flex-col gap-1">
+        <span className="text-fg-dim">问题</span>
+        <input
+          className="rounded border border-line bg-bg-elev px-2 py-1 text-fg outline-none focus:border-accent"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+        />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-fg-dim">答案</span>
+        <textarea
+          className="min-h-[80px] rounded border border-line bg-bg-elev px-2 py-1 text-fg outline-none focus:border-accent"
+          value={answer}
+          onChange={(e) => setAnswer(e.target.value)}
+        />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-fg-dim">标签（逗号分隔）</span>
+        <input
+          className="rounded border border-line bg-bg-elev px-2 py-1 text-fg outline-none focus:border-accent"
+          value={tags}
+          onChange={(e) => setTags(e.target.value)}
+        />
+      </label>
+      <label className="flex flex-col gap-1">
+        <span className="text-fg-dim">置信度</span>
+        <select
+          className="rounded border border-line bg-bg-elev px-2 py-1 text-fg outline-none focus:border-accent"
+          value={confidence}
+          onChange={(e) => setConfidence(e.target.value)}
+        >
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </select>
+      </label>
+      {error && <p className="text-danger">{error}</p>}
+      <div className="flex items-center gap-2">
+        <button
+          className="rounded bg-accent px-3 py-1 text-bg transition-opacity disabled:opacity-50"
+          disabled={saving || !question.trim()}
+          onClick={save}
+        >
+          {saving ? "保存中…" : "保存"}
+        </button>
+        <span className="text-[11px] text-fg-dim">来源引用保持不变</span>
+      </div>
     </div>
   );
 }

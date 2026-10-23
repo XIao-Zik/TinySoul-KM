@@ -88,10 +88,13 @@ class MemoryWriteSession:
                         "Use write_daily for the Reflection target daily"
                     )
                 stored = await memory.write_markdown(ref, markdown)
-        except MemoryContractError:
+        except MemoryContractError as exc:
+            # Surface the concrete contract rule (e.g. "cannot contain a
+            # level-1 heading") so the turn can actually self-correct;
+            # the generic text alone sent models into endless retries.
             return _failed(
                 execution,
-                prompt_text.MEMORY_WRITE_REJECTED,
+                f"{prompt_text.MEMORY_WRITE_REJECTED} Contract violation: {exc}",
                 "invalid_document",
             )
         except MemoryError as exc:

@@ -606,3 +606,26 @@ group = "knowledge.reflection"
 title = "Daily Card Limit"
 description = "Maximum knowledge cards generated per day."
 value_kind = "integer"
+
+[[field_group]]
+id = "knowledge.archive"
+surface = "knowledge"
+title = "Workspace Archive Ingest"
+description = "Controls ingestion of archived workspace documents and retention of already-ingested archives."
+
+[[field]]
+path = "knowledge.archive.archive_root"
+surface = "knowledge"
+group = "knowledge.archive"
+title = "Archive Root"
+description = "Project-relative directory holding the daily archives; defaults to the project-root archive directory."
+value_kind = "string"
+importance = "advanced"
+
+[[field]]
+path = "knowledge.archive.retention_days"
+surface = "knowledge"
+group = "knowledge.archive"
+title = "Archive Retention Days"
+description = "Days to keep already-ingested workspace files in daily archives before cleanup; 0 disables cleanup."
+value_kind = "integer"

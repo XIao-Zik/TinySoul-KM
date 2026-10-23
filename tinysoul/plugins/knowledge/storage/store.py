@@ -5,6 +5,7 @@ Layout under the configured knowledge root::
     notes/<relative path>.md    imported vault notes (structure mirrored)
     chats/<YYYY-MM>/<...>.md    chat exports (M3)
     cards/<YYYY-MM-DD>.md       daily knowledge cards (M4)
+    workspace/<YYYY-MM-DD>/...  archived workspace documents (archive ingest)
     tombstones.jsonl            append-only delete/rename audit trail
     .tinysoul_knowledge/        derived index and embedding cache
 
@@ -50,6 +51,10 @@ class KnowledgeStore:
         return self._root / "cards"
 
     @property
+    def workspace_root(self) -> Path:
+        return self._root / "workspace"
+
+    @property
     def internal_root(self) -> Path:
         return self._root / ".tinysoul_knowledge"
 
@@ -92,15 +97,18 @@ class KnowledgeStore:
                 f"Failed to read knowledge note {relative_path}: {exc}"
             ) from exc
 
-    def read_document(self, relative_path: str, *, source: str) -> str:
-        """Read a store document from the root matching its km_source."""
-
-        base = {
+    def _root_for(self, source: str) -> Path:
+        return {
             "obsidian": self.notes_root,
             "chat": self.chats_root,
             "card": self.cards_root,
+            "workspace": self.workspace_root,
         }.get(source, self.notes_root)
-        path = self._safe_path(base, relative_path)
+
+    def read_document(self, relative_path: str, *, source: str) -> str:
+        """Read a store document from the root matching its km_source."""
+
+        path = self._safe_path(self._root_for(source), relative_path)
         if not path.is_file():
             raise KnowledgeIOError(
                 f"Knowledge document does not exist: {relative_path}"
@@ -143,6 +151,30 @@ class KnowledgeStore:
         except OSError as exc:
             raise KnowledgeIOError(
                 f"Failed to write card document {relative_path}: {exc}"
+            ) from exc
+        return path
+
+    def write_workspace(self, relative_path: str, text: str) -> Path:
+        """Write under ``workspace/`` (paths like ``2026-10-13/note.md``)."""
+
+        path = self._safe_path(self.workspace_root, relative_path)
+        try:
+            atomic_write_text(path, text)
+        except OSError as exc:
+            raise KnowledgeIOError(
+                f"Failed to write workspace document {relative_path}: {exc}"
+            ) from exc
+        return path
+
+    def write_document(self, relative_path: str, text: str, *, source: str) -> Path:
+        """Rewrite a store document in the root matching its km_source."""
+
+        path = self._safe_path(self._root_for(source), relative_path)
+        try:
+            atomic_write_text(path, text)
+        except OSError as exc:
+            raise KnowledgeIOError(
+                f"Failed to write knowledge document {relative_path}: {exc}"
             ) from exc
         return path
 
